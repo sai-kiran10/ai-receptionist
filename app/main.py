@@ -8,25 +8,19 @@ import uuid
 
 app = FastAPI()
 
-# -------------------------------
 # DynamoDB setup
-# -------------------------------
 dynamodb = boto3.resource('dynamodb', region_name='us-east-1')
 slots_table = dynamodb.Table("Slots")
 appointments_table = dynamodb.Table("Appointments")
 
-# -------------------------------
 # Helper functions
-# -------------------------------
 def current_ts():
     return int(datetime.utcnow().timestamp())
 
 def current_iso():
     return datetime.utcnow().isoformat()
 
-# -------------------------------
 # Request Models
-# -------------------------------
 class HoldSlotRequest(BaseModel):
     slot_id: str
     phone_number: str
@@ -36,9 +30,7 @@ class ConfirmAppointmentRequest(BaseModel):
     slot_id: str
     phone_number: str
 
-# -------------------------------
 # Hold slot
-# -------------------------------
 @app.post("/slots/hold")
 def hold_slot(request: HoldSlotRequest):
     ttl = current_ts() + request.hold_seconds
@@ -64,9 +56,7 @@ def hold_slot(request: HoldSlotRequest):
             raise HTTPException(status_code=500, detail=str(e))
     return {"success": True, "slot": response["Attributes"]}
 
-# -------------------------------
 # Confirm appointment
-# -------------------------------
 @app.post("/appointments/confirm")
 def confirm_appointment(request: ConfirmAppointmentRequest):
     now_ts = current_ts()
@@ -88,7 +78,7 @@ def confirm_appointment(request: ConfirmAppointmentRequest):
         else:
             raise HTTPException(status_code=500, detail=str(e))
 
-    # Create appointment record
+    # Create an appointment record
     appointment_id = str(uuid.uuid4())
     try:
         appointments_table.put_item(
@@ -105,20 +95,16 @@ def confirm_appointment(request: ConfirmAppointmentRequest):
 
     return {"success": True, "appointment_id": appointment_id}
 
-# -------------------------------
 # List all slots (for testing)
-# -------------------------------
 @app.get("/slots")
 def list_slots():
     response = slots_table.scan()
     items = response.get("Items", [])
-    # Sort by date and start_time
+    # Sort by date and time
     items.sort(key=lambda x: (x['date'], x['start_time']))
     return items
 
-# -------------------------------
 # Auto-expire HELD slots
-# -------------------------------
 async def expire_held_slots():
     while True:
         now_ts = current_ts()
