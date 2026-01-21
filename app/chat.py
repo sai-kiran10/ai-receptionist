@@ -1,29 +1,22 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from app.schemas import ChatRequest
-from app.llm import extract_intent
-from app.services.slots import get_available_slots
+from app.services.gemini_service import GeminiService
+from app.services.llm_interface import LLMInterface
 
 router = APIRouter()
 
+def get_llm_service()->LLMInterface:
+    return GeminiService()
+
 @router.post("/chat")
-def chat(request: ChatRequest):
-    intent = extract_intent(request.message)
-
-    if intent["intent"] == "BOOK":
-        if not intent["date"]:
-            return {"reply": "Which date are you looking for?"}
-
-        slots = get_available_slots(
-            date=intent["date"],
-            time_pref=intent["time_preference"]
-        )
-
-        if not slots:
-            return {"reply": "No available slots for that time."}
-
-        return {
-            "reply": "Here are some available times.",
-            "slots": slots
-        }
-
-    return {"reply": "I can help you book an appointment."}
+async def chat(
+    request: ChatRequest,
+    llm: LLMInterface = Depends(get_llm_service)
+):
+    """
+    Takes the user message and passes it to the AI.
+    Gemini will automatically decide if it needs to call 
+    'get_available_slots' or 'hold_slot' based on the conversation.
+    """
+    response_text = llm.generate_response(request.message)
+    return {"reply": response_text}

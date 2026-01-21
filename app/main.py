@@ -1,15 +1,27 @@
 from fastapi import FastAPI
+from contextlib import asynccontextmanager
+import asyncio
+
 from app.api.routes import router as api_router
 from app.chat import router as chat_router
 from app.background.expiry import expire_held_slots
-import asyncio
 
-app = FastAPI()
+# The Lifespan handles startup and shutdown in one clean block
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # --- Startup Logic ---
+    print("🚀 Starting AI Receptionist...")
+    # This runs your background task for DynamoDB slot expiry
+    bg_task = asyncio.create_task(expire_held_slots())
+    
+    yield  # The app is now running and "alive"
+    
+    # --- Shutdown Logic ---
+    print("🛑 Shutting down...")
+    bg_task.cancel() # Cleanly stop the background worker
 
-app.include_router(api_router)
-app.include_router(chat_router)
+app = FastAPI(title="AI Receptionist", lifespan=lifespan)
 
-@app.on_event("startup")
-async def startup_event():
-    asyncio.create_task(expire_held_slots())
-
+# Including routers with clear prefixes
+app.include_router(api_router, prefix="/api/v1")
+#app.include_router(chat_router, prefix="/chat/v1")

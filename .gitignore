@@ -1,0 +1,22 @@
+# Environment Variables (CRITICAL)
+.env
+
+# Python Virtual Environment
+venv/
+ENV/
+env/
+.venv/
+
+# Python Cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Local Databases / Temp Files
+*.db
+*.sqlite3
+
+# OS Files
+.DS_Store
+Thumbs.db
