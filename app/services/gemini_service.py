@@ -1,5 +1,5 @@
-import google.genai as genai
 import os
+import google.genai as genai
 from dotenv import load_dotenv
 from .llm_interface import LLMInterface
 from app.services.slots import get_available_slots
@@ -7,20 +7,11 @@ from app.services.bookings import hold_slot, confirm_appointment
 
 load_dotenv()
 
-RECEPTIONIST_INSTRUCTIONS = """
-You are a professional appointment scheduling assistant.
-Your goal is to help users with the following intents: 
-BOOK, CONFIRM, CANCEL, and ASK_AVAILABILITY.
-
-Rules:
-1. To check availability, call 'get_available_slots'.
-2. To start a booking, call 'hold_slot'.
-3. To finalize, call 'confirm_appointment'.
-4. If a user's intent is UNKNOWN, ask clarifying questions politely.
-5. Do not make up information; always use the provided tools.
-"""
-
 class GeminiService(LLMInterface):
+    # CLASS-LEVEL ATTRIBUTE: This persists in the server's memory across all API calls.
+    # It allows the AI to "remember" Sid and the previous context.
+    _chat_history = []
+
     def __init__(self):
         api_key = os.getenv("GEMINI_API_KEY")
         if not api_key:
@@ -30,13 +21,38 @@ class GeminiService(LLMInterface):
         self.model_id = "gemini-2.0-flash"
 
     def generate_response(self, prompt: str) -> str:
-        # The calling syntax is also slightly different in the new SDK
-        response = self.client.models.generate_content(
+        # 1. Create a chat session using the persistent class history
+        # Using start_chat (or chats.create) is what enables "memory"
+        chat = self.client.chats.create(
             model=self.model_id,
-            contents=prompt,
             config={
                 'tools': [get_available_slots, hold_slot, confirm_appointment],
-                'system_instruction': "You are a professional receptionist for The Tech Clinic. Use the tools provided to manage bookings."
-            }
+                'system_instruction': (
+                    "You are a professional appointment scheduling assistant for The Tech Clinic. "
+                    "You MUST remember details provided by the user (like their name, phone number, and chosen date/time) "
+                    "throughout the conversation. If they mention a time once, do not ask for it again.\n\n"
+                    "Workflow:\n"
+                    "1. Check availability with 'get_available_slots'.\n"
+                    "2. When a time is picked, call 'hold_slot'.\n"
+                    "3. Ask for final confirmation, then call 'confirm_appointment'."
+                )
+            },
+            history=GeminiService._chat_history
         )
-        return response.text
+
+        # 2. Send the message within the stateful chat session
+        response = chat.send_message(prompt)
+
+        # 3. Update the class-level history so the NEXT request knows what happened in this one
+        GeminiService._chat_history = chat.get_history()
+
+        # Handle cases where the model might return a tool call result instead of plain text
+        if response.text:
+            return response.text
+        else:
+            return "I've processed that request for you. What else can I help with?"
+
+    @classmethod
+    def clear_history(cls):
+        """Helper method to reset the AI's memory (useful for testing)."""
+        cls._chat_history = []
