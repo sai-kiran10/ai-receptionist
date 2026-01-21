@@ -132,3 +132,77 @@ def confirm_appointment(slot_id: str, phone_number: str):
         if e.response['Error']['Code'] == 'ConditionalCheckFailedException':
             return {"success": False, "message": "Hold expired or slot was already booked. Please try again."}
         return {"success": False, "message": f"Database error: {str(e)}"}
+
+def get_appointments_by_phone(phone_number: str):
+    """
+    Search for existing appointments using a patient's phone number.
+    Use this when a user wants to cancel or check their booking but doesn't have an ID.
+    """
+    print(f"DEBUG: AI searching for appointments for phone: {phone_number}")
+    try:
+        #Using Scan with a FilterExpression to find the phone number
+        from boto3.dynamodb.conditions import Attr
+        response = appointments_table.scan(
+            FilterExpression=Attr('phone_number').eq(phone_number)
+        )
+        items = response.get('Items', [])
+        
+        if not items:
+            return {"success": True, "message": "No appointments found for this number.", "appointments": []}
+            
+        return {"success": True, "appointments": sanitize_decimal(items)}
+    except Exception as e:
+        return {"success": False, "message": str(e)}
+
+def cancel_appointment(appointment_id: str):
+    """
+    Cancels an existing appointment and makes the slot available again.
+    
+    Args:
+        appointment_id: The unique ID of the appointment to cancel.
+    """
+    print(f"DEBUG: AI invoking cancel_appointment for {appointment_id}")
+    
+    try:
+        #Get the appointment to find the associated slot_id
+        res = appointments_table.get_item(Key={"appointment_id": appointment_id})
+        item = res.get("Item")
+        if not item:
+            return {"success": False, "message": "Appointment ID not found."}
+        
+        slot_id = item["slot_id"]
+
+        #Mark the slot as AVAILABLE again
+        slots_table.update_item(
+            Key={"slot_id": slot_id},
+            UpdateExpression="SET #s = :avail, is_available = :true",
+            ExpressionAttributeNames={"#s": "status"},
+            ExpressionAttributeValues={":avail": "AVAILABLE", ":true": True}
+        )
+
+        appointments_table.delete_item(Key={"appointment_id": appointment_id})
+
+        return {"success": True, "message": "Appointment successfully cancelled."}
+    except Exception as e:
+        return {"success": False, "message": str(e)}
+
+def reschedule_appointment(appointment_id: str, new_slot_id: str):
+    """Moves an existing appointment to a new time slot."""
+    print(f"DEBUG: Executing Reschedule for {appointment_id} -> {new_slot_id}")
+    cancel_res = cancel_appointment(appointment_id)
+    
+    try:
+        slots_table.update_item(
+            Key={"slot_id": new_slot_id},
+            UpdateExpression="SET #s = :booked, is_available = :false",
+            ConditionExpression="#s = :avail",
+            ExpressionAttributeNames={"#s": "status"},
+            ExpressionAttributeValues={":booked": "BOOKED", ":false": False, ":avail": "AVAILABLE"}
+        )
+
+        if not cancel_res["success"]:
+            return cancel_res
+        
+        return {"success": True, "message": f"Appointment moved to {new_slot_id}. Please confirm the new time."}
+    except Exception as e:
+        return {"success": False, "error": str(e)}

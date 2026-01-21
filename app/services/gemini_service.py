@@ -3,7 +3,7 @@ import google.genai as genai
 from dotenv import load_dotenv
 from .llm_interface import LLMInterface
 from app.services.slots import get_available_slots
-from app.services.bookings import hold_slot, confirm_appointment      
+from app.services.bookings import hold_slot, confirm_appointment, cancel_appointment, reschedule_appointment, get_appointments_by_phone     
 
 load_dotenv()
 
@@ -26,7 +26,7 @@ class GeminiService(LLMInterface):
         chat = self.client.chats.create(
             model=self.model_id,
             config={
-                'tools': [get_available_slots, hold_slot, confirm_appointment],
+                'tools': [get_available_slots, hold_slot, confirm_appointment, cancel_appointment, reschedule_appointment, get_appointments_by_phone],
                 'system_instruction': (
                     "You are a professional appointment scheduling assistant for The Tech Clinic. "
                     "You MUST remember details provided by the user (like their name, phone number, and chosen date/time) "
@@ -34,7 +34,10 @@ class GeminiService(LLMInterface):
                     "Workflow:\n"
                     "1. Check availability with 'get_available_slots'.\n"
                     "2. When a time is picked, call 'hold_slot'.\n"
-                    "3. Ask for final confirmation, then call 'confirm_appointment'."
+                    "3. Ask for final confirmation, then call 'confirm_appointment'.\n"
+                    "If a user wants to cancel or check an appointment but doesn't have an ID, "
+                    "ask for their phone number and use 'get_appointments_by_phone' to find it. "
+                    "Once found, confirm with the user before calling 'cancel_appointment'."
                 )
             },
             history=GeminiService._chat_history

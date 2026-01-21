@@ -8,11 +8,14 @@ router = APIRouter()
 
 @router.post("/slots/hold")
 def hold(request: HoldSlotRequest):
-    return hold_slot(request)
+    return hold_slot(slot_id=request.slot_id, 
+                     phone_number=request.phone_number,
+                     hold_seconds=request.hold_seconds)
 
 @router.post("/appointments/confirm")
 def confirm(request: ConfirmAppointmentRequest):
-    return confirm_appointment(request)
+    return confirm_appointment(slot_id=request.slot_id, 
+                               phone_number=request.phone_number)
 
 @router.get("/slots")
 def list_slots():
