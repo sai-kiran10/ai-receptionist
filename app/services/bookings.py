@@ -4,8 +4,22 @@ from decimal import Decimal
 from datetime import datetime
 from botocore.exceptions import ClientError
 from app.db import slots_table, appointments_table
-
 from pydantic import BaseModel
+
+sns_client = boto3.client('sns', region_name='us-east-1')
+
+def send_sms_notification(phone_number: str, message: str):
+    """Sends an SMS notification via AWS SNS."""
+    try:
+       print(f"DEBUG: Sending SMS to {phone_number}: {message}")
+       sns_client.publish(
+            PhoneNumber=phone_number,
+            Message=message
+        )
+       return True
+    except Exception as e:
+        print(f"ERROR: Failed to send SMS: {e}")
+        return False
 
 # Add these back so routes.py can import them
 class HoldSlotRequest(BaseModel):
@@ -87,7 +101,7 @@ def confirm_appointment(slot_id: str, phone_number: str):
     """
     Finalizes a booking that is currently being held.
     Call this ONLY after the user confirms they definitely want to book the appointment.
-    
+    After finalizing the appointment send an SMS.
     Args:
         slot_id: The unique ID of the slot (e.g., '2026-01-22-10:00')
         phone_number: The user's contact number.
@@ -122,10 +136,13 @@ def confirm_appointment(slot_id: str, phone_number: str):
             }
         )
         
+        sms_msg = f"Confirmed! Your appointment at the Clinic is set for {slot_id}. Booking ID: {appointment_id}"
+        send_sms_notification(phone_number, sms_msg)
+
         return {
             "success": True, 
             "appointment_id": appointment_id,
-            "message": "Appointment successfully confirmed!"
+            "message": "Appointment confirmed and SMS sent!"
         }
 
     except ClientError as e:
@@ -157,7 +174,7 @@ def get_appointments_by_phone(phone_number: str):
 def cancel_appointment(appointment_id: str):
     """
     Cancels an existing appointment and makes the slot available again.
-    
+    Sends SMS after cancelling.
     Args:
         appointment_id: The unique ID of the appointment to cancel.
     """
@@ -171,6 +188,7 @@ def cancel_appointment(appointment_id: str):
             return {"success": False, "message": "Appointment ID not found."}
         
         slot_id = item["slot_id"]
+        phone_number = item.get("phone_number")
 
         #Mark the slot as AVAILABLE again
         slots_table.update_item(
@@ -182,13 +200,22 @@ def cancel_appointment(appointment_id: str):
 
         appointments_table.delete_item(Key={"appointment_id": appointment_id})
 
+        if phone_number:
+            sms_msg = f"Your appointment for {slot_id} has been cancelled."
+            send_sms_notification(phone_number, sms_msg)
+
         return {"success": True, "message": "Appointment successfully cancelled."}
     except Exception as e:
         return {"success": False, "message": str(e)}
 
 def reschedule_appointment(appointment_id: str, new_slot_id: str):
-    """Moves an existing appointment to a new time slot."""
+    """Moves an existing appointment to a new time slot and sends SMS."""
     print(f"DEBUG: Executing Reschedule for {appointment_id} -> {new_slot_id}")
+    
+    res = appointments_table.get_item(Key={'appointment_id': appointment_id})
+    item = res.get("Item", {})
+    phone_number = item.get("phone_number")
+
     cancel_res = cancel_appointment(appointment_id)
     
     try:
@@ -203,6 +230,12 @@ def reschedule_appointment(appointment_id: str, new_slot_id: str):
         if not cancel_res["success"]:
             return cancel_res
         
+        if phone_number:
+            sms_msg = f"Your appointment has been rescheduled to {new_slot_id}."
+            send_sms_notification(phone_number, sms_msg)
+
         return {"success": True, "message": f"Appointment moved to {new_slot_id}. Please confirm the new time."}
     except Exception as e:
         return {"success": False, "error": str(e)}
+
+ 
