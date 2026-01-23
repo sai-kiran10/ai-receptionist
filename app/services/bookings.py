@@ -5,16 +5,26 @@ from datetime import datetime
 from botocore.exceptions import ClientError
 from app.db import slots_table, appointments_table
 from pydantic import BaseModel
+import os
+from twilio.rest import Client
+from dotenv import load_dotenv
 
-sns_client = boto3.client('sns', region_name='us-east-1')
+#sns_client = boto3.client('sns', region_name='us-east-1')
+load_dotenv()
+
+account_sid = os.getenv('TWILIO_ACCOUNT_SID')
+auth_token = os.getenv('TWILIO_AUTH_TOKEN')
+twilio_number = os.getenv('TWILIO_PHONE_NUMBER')
+twilio_client = Client(account_sid, auth_token)
 
 def send_sms_notification(phone_number: str, message: str):
-    """Sends an SMS notification via AWS SNS."""
+    """Sends an SMS notification via Twilio."""
     try:
-       print(f"DEBUG: Sending SMS to {phone_number}: {message}")
-       sns_client.publish(
-            PhoneNumber=phone_number,
-            Message=message
+       print(f"DEBUG: Sending SMS to {phone_number}")
+       twilio_client.messages.create(
+           body = message,
+            from_=twilio_number,
+            to=phone_number,
         )
        return True
     except Exception as e:

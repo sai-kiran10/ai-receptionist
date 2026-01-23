@@ -24,7 +24,7 @@ session = boto3.Session(
 
 # Initialize resources and clients using the session
 dynamodb = session.resource('dynamodb')
-sns_client = session.client('sns')
+#sns_client = session.client('sns')
 
 slots_table = dynamodb.Table("Slots")
 appointments_table = dynamodb.Table("Appointments")
