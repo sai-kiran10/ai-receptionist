@@ -19,7 +19,7 @@ class GeminiService(LLMInterface):
             raise ValueError("GEMINI_API_KEY not found in environment variables")
             
         self.client = genai.Client(api_key=api_key)
-        self.model_id = "gemini-2.0-flash"
+        self.model_id = "gemini-2.5-flash"
 
     def generate_response(self, prompt: str) -> str:
         #Create a chat session using the persistent class history

@@ -37,7 +37,11 @@ async def chat_with_receptionist(
 
 @router.post("/sms/webhook")
 async def handle_sms(From: str = Form(...), Body: str = Form(...)):
-    ai_reply = llm.generate_response(Body)
+    clean_phone = From.replace("whatsapp:", "")
+
+    prompt_with_context = f"[User Phone: {clean_phone}] {Body}"
+    
+    ai_reply = llm.generate_response(prompt_with_context)
 
     response = MessagingResponse()
     response.message(ai_reply)
