@@ -18,20 +18,25 @@ twilio_number = os.getenv('TWILIO_PHONE_NUMBER')
 twilio_client = Client(account_sid, auth_token)
 
 def send_sms_notification(phone_number: str, message: str):
-    """Sends an SMS notification via Twilio."""
+    """Sends an SMS notification via Twilio WhatsApp Sandbox."""
     try:
-       print(f"DEBUG: Sending SMS to {phone_number}")
-       twilio_client.messages.create(
-           body = message,
-            from_=twilio_number,
-            to=phone_number,
+       # If the incoming phone_number doesn't already have the prefix, add it
+        to_whatsapp = phone_number if phone_number.startswith("whatsapp:") else f"whatsapp:{phone_number}"
+        from_whatsapp = f"whatsapp:{twilio_number}"
+        
+        print(f"DEBUG: Sending WhatsApp to {to_whatsapp} from {from_whatsapp}")
+        
+        twilio_client.messages.create(
+            body=message,
+            from_=from_whatsapp,
+            to=to_whatsapp,
         )
-       return True
+        return True
     except Exception as e:
-        print(f"ERROR: Failed to send SMS: {e}")
+        print(f"ERROR: Failed to send WhatsApp: {e}")
         return False
+    
 
-# Add these back so routes.py can import them
 class HoldSlotRequest(BaseModel):
     slot_id: str
     phone_number: str
@@ -66,13 +71,16 @@ def sanitize_decimal(data):
 
 def hold_slot(slot_id: str, phone_number: str, hold_seconds: int = 60):
     """
-    Temporarily holds an appointment slot to prevent others from booking it.
-    Use this when a user selects a time but has not yet given final confirmation.
+    Temporarily holds an appointment slot. 
     
+    IMPORTANT: The AI must find the correct 'slot_id' from the list of available slots 
+    retrieved via 'get_available_slots'. Do NOT ask the user for the slot_id or 
+    a specific format; use the ID that matches the time the user requested.
+
     Args:
-        slot_id: The unique ID of the slot (e.g., '2026-01-22-10:00')
-        phone_number: The user's contact number.
-        hold_seconds: How long the hold lasts before expiring (default 60s).
+        slot_id: The internal unique ID for the slot.
+        phone_number: The user's contact number (without 'whatsapp:' prefix).
+        hold_seconds: Duration of the hold in seconds.
     """
     print(f"DEBUG: AI invoking hold_slot for {slot_id}")
     ttl = current_ts() + hold_seconds
@@ -120,7 +128,7 @@ def confirm_appointment(slot_id: str, phone_number: str):
     now_ts = current_ts()
     
     try:
-        # 1. Update Slot status to BOOKED
+        #Update Slot status to BOOKED
         slots_table.update_item(
             Key={"slot_id": slot_id},
             UpdateExpression="SET #s = :booked, is_available = :false",
@@ -134,7 +142,7 @@ def confirm_appointment(slot_id: str, phone_number: str):
             }
         )
         
-        # 2. Create the permanent Appointment record
+        #Create the permanent Appointment record
         appointment_id = str(uuid.uuid4())
         appointments_table.put_item(
             Item={
