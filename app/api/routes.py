@@ -1,9 +1,11 @@
-from fastapi import APIRouter, Depends, Form, Response
+from fastapi import APIRouter, Depends, Form, Response, WebSocket
 from app.services.bookings import HoldSlotRequest, ConfirmAppointmentRequest, hold_slot, confirm_appointment
 from app.services.slots import get_available_slots
 from app.services.gemini_service import GeminiService
 from app.services.llm_interface import LLMInterface
 from twilio.twiml.messaging_response import MessagingResponse
+from twilio.twiml.voice_response import VoiceResponse, Connect
+import json
 
 router = APIRouter()
 llm = GeminiService()
@@ -48,3 +50,34 @@ async def handle_sms(From: str = Form(...), Body: str = Form(...)):
 
     return Response(content=str(response), media_type="application/xml")
 
+@router.post("/voice/webhook")
+async def handle_voice_entry():
+    """Initial entry point for the call. Connects to WebSocket."""
+    response = VoiceResponse()
+    connect = Connect()
+    connect.stream(url=f"https://unmonistic-aarav-despitefully.ngrok-free.dev/api/v1/voice/stream")
+    response.append(connect)
+    return Response(content=str(response), media_type="application/xml")
+
+@router.websocket("/voice/stream")
+async def voice_stream(websocket: WebSocket):
+    """Handles the live audio stream and interruptions."""
+    await websocket.accept()
+    print("🚀 Voice Stream Connected")
+    
+    try:
+        while True:
+            message = await websocket.receive_text()
+            data = json.loads(message)
+            
+            if data['event'] == "start":
+                print("Call started")
+            elif data['event'] == "media":
+                pass
+            elif data['event'] == "mark":
+                print("Audio playback finished")
+                
+    except Exception as e:
+        print(f"Voice Stream Error: {e}")
+    finally:
+        await websocket.close()
