@@ -1,11 +1,11 @@
-from fastapi import APIRouter, Depends, Form, Response, WebSocket
+from fastapi import APIRouter, Depends, Form, Response, WebSocket, Request
 from app.services.bookings import HoldSlotRequest, ConfirmAppointmentRequest, hold_slot, confirm_appointment
 from app.services.slots import get_available_slots
 from app.services.gemini_service import GeminiService
 from app.services.llm_interface import LLMInterface
 from twilio.twiml.messaging_response import MessagingResponse
 from twilio.twiml.voice_response import VoiceResponse, Connect
-import json
+import json, base64
 
 router = APIRouter()
 llm = GeminiService()
@@ -51,12 +51,18 @@ async def handle_sms(From: str = Form(...), Body: str = Form(...)):
     return Response(content=str(response), media_type="application/xml")
 
 @router.post("/voice/webhook")
-async def handle_voice_entry():
+async def handle_voice_entry(request: Request):
     """Initial entry point for the call. Connects to WebSocket."""
     response = VoiceResponse()
+    
+    host = request.headers.get("host")
+    stream_url = f"wss://{host}/api/v1/voice/stream"
+
     connect = Connect()
-    connect.stream(url=f"https://unmonistic-aarav-despitefully.ngrok-free.dev/api/v1/voice/stream")
+    connect.stream(url=stream_url)
     response.append(connect)
+
+    print(f"Streaming to: {stream_url}")
     return Response(content=str(response), media_type="application/xml")
 
 @router.websocket("/voice/stream")
@@ -64,20 +70,28 @@ async def voice_stream(websocket: WebSocket):
     """Handles the live audio stream and interruptions."""
     await websocket.accept()
     print("🚀 Voice Stream Connected")
-    
+    stream_sid = None
+
     try:
         while True:
             message = await websocket.receive_text()
             data = json.loads(message)
             
             if data['event'] == "start":
-                print("Call started")
+                stream_sid = data['start']['streamSid']
+                print("Call started, StreamSid: {stream_sid}")
             elif data['event'] == "media":
-                pass
-            elif data['event'] == "mark":
-                print("Audio playback finished")
+                payload = data['media']['payload']
+                audio_bytes = base64.base64decode(payload)
+            elif data['event'] == "stop":
+                print("Call ended by user")
+                break
                 
     except Exception as e:
         print(f"Voice Stream Error: {e}")
     finally:
-        await websocket.close()
+        try:
+            await websocket.close()
+        except:
+            pass
+        print("Connection closed safely")
