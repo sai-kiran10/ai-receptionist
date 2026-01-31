@@ -82,7 +82,7 @@ async def voice_stream(websocket: WebSocket):
                 print("Call started, StreamSid: {stream_sid}")
             elif data['event'] == "media":
                 payload = data['media']['payload']
-                audio_bytes = base64.base64decode(payload)
+                audio_bytes = base64.b64decode(payload)
             elif data['event'] == "stop":
                 print("Call ended by user")
                 break
