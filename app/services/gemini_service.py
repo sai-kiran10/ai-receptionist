@@ -8,7 +8,6 @@ from datetime import datetime
 
 load_dotenv()
 
-
 class GeminiService(LLMInterface):
     # It allows the AI to remember previous context.
     _chat_history = []
