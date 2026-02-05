@@ -7,6 +7,8 @@ from twilio.twiml.messaging_response import MessagingResponse
 from twilio.twiml.voice_response import VoiceResponse, Connect
 import os, json, base64, asyncio
 from google import genai
+from google.genai import types
+import audioop
 
 router = APIRouter()
 llm = GeminiService()
@@ -79,10 +81,16 @@ async def voice_stream(websocket: WebSocket):
     await websocket.accept()
     print("🚀 Voice Stream Connected")
 
-    client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"), http_options={'api_version': 'v1beta'})
+    client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"), http_options={'api_version': 'v1alpha'})
 
     config = {
         "response_modalities": ["AUDIO"],
+        "speech_config": {
+            "voice_config": {
+                "prebuilt_voice_config": {"voice_name": "Puck"}
+            }
+        },
+        "threshold": 0.5,
         "tools": [{"function_declarations": [
             {"name": "get_available_slots", "description": "Get available slots for a date (YYYY-MM-DD).", 
              "parameters": {"type": "OBJECT", "properties": {"date": {"type": "string"}}}},
@@ -97,9 +105,13 @@ async def voice_stream(websocket: WebSocket):
     async with client.aio.live.connect(model=MODEL_ID, config=config) as session:
         stream_sid = None
 
+        await session.send_client_content(
+            turns=[types.Content(role="user", parts=[types.Part(text="Hello! Welcome to The Tech Clinic. How you can help you today?")])],
+            turn_complete=True
+        )
         async def send_to_twilio():
             async for message in session.receive():
-
+                print("DEBUG - Received msg from Gemini")
                 if message.tool_call:
                     for fc in message.tool_call.function_calls:
                         f_name = fc.name
@@ -122,7 +134,11 @@ async def voice_stream(websocket: WebSocket):
                 if message.server_content and message.server_content.model_turn:
                     for part in message.server_content.model_turn.parts:
                         if part.inline_data:
-                            audio_payload = base64.b64encode(part.inline_data.data).decode('utf-8')
+                            raw_audio = part.inline_data.data
+                            resampled_audio, _ = audioop.ratecv(raw_audio, 2, 1, 24000, 8000, None)
+                            mulaw_audio = audioop.lin2ulaw(resampled_audio, 2)
+
+                            audio_payload = base64.b64encode(mulaw_audio).decode('utf-8')
                             await websocket.send_json({
                                 "event": "media",
                                 "streamSid": stream_sid,
@@ -137,14 +153,15 @@ async def voice_stream(websocket: WebSocket):
                 
                 if data['event'] == "start":
                     stream_sid = data['start']['streamSid']
-                    print("Call started, StreamSid: {stream_sid}")
+                    print(f"Call started, StreamSid: {stream_sid}")
                 elif data['event'] == "media":
                     payload = data['media']['payload']
-                    await session.send(input={
-                        "data": base64.b64decode(payload),
-                        "mime_type": "audio/pcm;rate=800"
-                        },
-                        end_of_turn=False)
+                    await session.send_realtime_input(
+                        media=types.Blob(
+                            data=base64.b64decode(payload),
+                            mime_type="audio/mu-law;rate=8000"
+                        )
+                    )
                 elif data['event'] == "stop":
                     break
                     
