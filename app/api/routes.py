@@ -90,7 +90,9 @@ async def voice_stream(websocket: WebSocket):
                 "prebuilt_voice_config": {"voice_name": "Puck"}
             }
         },
-        "threshold": 0.5,
+        "generation_config": {
+            "candidate_count": 1,
+        },
         "tools": [{"function_declarations": [
             {"name": "get_available_slots", "description": "Get available slots for a date (YYYY-MM-DD).", 
              "parameters": {"type": "OBJECT", "properties": {"date": {"type": "string"}}}},
@@ -99,16 +101,20 @@ async def voice_stream(websocket: WebSocket):
             {"name": "confirm_appointment", "description": "Finalize a booking.", 
              "parameters": {"type": "OBJECT", "properties": {"slot_id": {"type": "string"}, "phone_number": {"type": "string"}}}}
         ]}],
-        "system_instruction": "You are a receptionist. If a user asks for slots, call get_available_slots. Be natural and brief."
+        "system_instruction": "You are a receptionist and this is a live call. Respond immediately when the user finishes speaking."
+                              "After you speak, listem immediately for patient's response. If a user asks for slots, use your tools."
+                              " Be natural and brief."
     }
 
     async with client.aio.live.connect(model=MODEL_ID, config=config) as session:
         stream_sid = None
 
-        await session.send_client_content(
+        '''await session.send_client_content(
             turns=[types.Content(role="user", parts=[types.Part(text="Hello! Welcome to The Tech Clinic. How you can help you today?")])],
             turn_complete=True
-        )
+        )'''
+        await session.send(input="Please greet the patient and ask how you can help.")
+
         async def send_to_twilio():
             async for message in session.receive():
                 print("DEBUG - Received msg from Gemini")
@@ -156,12 +162,20 @@ async def voice_stream(websocket: WebSocket):
                     print(f"Call started, StreamSid: {stream_sid}")
                 elif data['event'] == "media":
                     payload = data['media']['payload']
+                    mu_law_data = base64.b64decode(payload)
+                    pcm_data = audioop.ulaw2lin(mu_law_data, 2)
+                    #print(f"DEBUG Audio: {decoded_data[:10].hex()}...Length: {len(decoded_data)}")
+
                     await session.send_realtime_input(
                         media=types.Blob(
-                            data=base64.b64decode(payload),
-                            mime_type="audio/mu-law;rate=8000"
+                            data=pcm_data,
+                            mime_type="audio/pcm;rate=8000"
                         )
                     )
+                    '''await session.send(input={
+                        "data": pcm_data,
+                        "mime_type": "audio/pcm;rate=8000"
+                    })'''
                 elif data['event'] == "stop":
                     break
                     
