@@ -140,7 +140,11 @@ async def voice_stream(websocket: WebSocket):
                     print("Call started, StreamSid: {stream_sid}")
                 elif data['event'] == "media":
                     payload = data['media']['payload']
-                    await session.send(input=base64.b64decode(payload), end_of_turn=False)
+                    await session.send(input={
+                        "data": base64.b64decode(payload),
+                        "mime_type": "audio/pcm;rate=800"
+                        },
+                        end_of_turn=False)
                 elif data['event'] == "stop":
                     break
                     
