@@ -43,7 +43,7 @@ class GeminiService(LLMInterface):
                     "3. Ask for final confirmation, then call 'confirm_appointment'.\n"
                     "If a user wants to cancel or check an appointment but doesn't have an ID, "
                     "ask for their phone number and use 'get_appointments_by_phone' to find it. "
-                    "Once found, confirm with the user before calling 'cancel_appointment'."
+                    "Once found, confirm with the user before calling 'cancel_appointment'"
                 )
             },
             history=GeminiService._chat_history
