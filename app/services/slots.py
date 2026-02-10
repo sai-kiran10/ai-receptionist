@@ -9,11 +9,11 @@ def get_available_slots(date: str = None):
     target_date = date if date else today_str
 
     # Run maintenance before searching
-    cleanup_and_seed_slots(today_str)
+    #cleanup_and_seed_slots(today_str)
 
     print(f"DEBUG: AI searching for date={target_date}")
-    
-    response = slots_table.scan(
+    #cleanup_and_seed_slots(today_str)
+    '''response = slots_table.scan(
         FilterExpression=Attr('date').eq(target_date) & Attr('is_available').eq(True)
     )
 
@@ -25,9 +25,29 @@ def get_available_slots(date: str = None):
                 item[key] = int(value) if value % 1 == 0 else float(value)
 
     items.sort(key=lambda x: x.get('slot_id', ''))
-    return items
+    return items'''
+    try:
+        response = slots_table.scan(
+            FilterExpression=Attr('date').eq(target_date) & Attr('is_available').eq(True)
+        )
 
-def cleanup_and_seed_slots(today_str: str):
+        items = response.get("Items", [])
+    
+        '''available = []
+        for item in items:
+            available.append({
+                "slot_id": item.get("slot_id"),
+                "time": item.get("time")
+            })
+        return {"available_slots": available}'''
+        slot_strings = [f"{item['time']} (ID: {item['slot_id']})" for item in items]
+    
+        return {"available_slots": ", ".join(slot_strings) if slot_strings else "No slots available."}
+    except Exception as e:
+        print(f"Database error: {e}")
+        return {"error": "could not retrive slots."}
+    
+#def cleanup_and_seed_slots(today_str: str):
     """Deletes old data and ensures a full week of slots exists."""
     try:
         #Delete anything older than today

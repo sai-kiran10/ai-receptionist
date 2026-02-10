@@ -90,27 +90,20 @@ async def voice_stream(websocket: WebSocket):
                 "prebuilt_voice_config": {"voice_name": "Puck"}
             }
         },
-        "voice_activity_detection": {
-            "voice_detection_configs": [{
-                "speech_hop_length_ms": 100,
-                "stop_gap_ms": 600,
-                "pre_speech_silence_detection_threshold_factor": 0.3
-            }]
-        },
         "generation_config": {
             "candidate_count": 1,
         },
         "tools": [{"function_declarations": [
             {"name": "get_available_slots", "description": "Get available slots for a date (YYYY-MM-DD).", 
-             "parameters": {"type": "OBJECT", "properties": {"date": {"type": "string"}}}},
+             "parameters": {"type": "OBJECT", "properties": {"date": {"type": "STRING", "description": "The date is in YYYY-MM-DD format"}}, "required": ["date"]}},
             {"name": "hold_slot", "description": "Temporary hold on a slot.", 
-             "parameters": {"type": "OBJECT", "properties": {"slot_id": {"type": "string"}, "phone_number": {"type": "string"}}}},
+             "parameters": {"type": "OBJECT", "properties": {"slot_id": {"type": "STRING"}, "phone_number": {"type": "STRING"}}, "required": ["slot_id", "phone_number"]}},
             {"name": "confirm_appointment", "description": "Finalize a booking.", 
-             "parameters": {"type": "OBJECT", "properties": {"slot_id": {"type": "string"}, "phone_number": {"type": "string"}}}}
+             "parameters": {"type": "OBJECT", "properties": {"slot_id": {"type": "STRING"}, "phone_number": {"type": "STRING"}}, "required": ["slot_id", "phone_number"]}}
         ]}],
         "system_instruction": "You are a receptionist and this is a live call. Respond immediately when the user finishes speaking."
-                              "After you speak, listem immediately for patient's response. If a user asks for slots, use your tools."
-                              " Be natural and brief."
+                              "After you speak, listem immediately for patient's response. If a user asks for slots, call get_available_slots."
+                              " Be natural and brief. If you are looking up information, say 'Let me check that for you' or 'One moment' while the tool is running."
     }
 
     async with client.aio.live.connect(model=MODEL_ID, config=config) as session:
@@ -129,20 +122,39 @@ async def voice_stream(websocket: WebSocket):
                     for fc in message.tool_call.function_calls:
                         f_name = fc.name
                         f_args = fc.args
-                        print(f"🛠️ Gemini is calling: {f_name} with {f_args}")
+                        #print(f"🛠️ Gemini is calling: {f_name} with {f_args}")
                         
                         # Execute the actual Python function
                         func = FUNCTIONS.get(f_name)
-                        result = func(**f_args) if func else {"error": "Function not found"}
-                        
+                        try:
+                            result = func(**f_args) if func else {"error": "Function not found"}
+                        except Exception as e:
+                            print(f"Tool execution crashed: {e}")
+                            result = {"error": "Internal tool error"}
                         # Send the result BACK to Gemini
-                        await session.send(tool_response={
+                        '''await session.send(tool_response={
                             "function_responses": [{
                                 "id": fc.id,
                                 "name": f_name,
                                 "response": {"result": result}
                             }]
-                        })
+                        })'''
+
+                        await session.send(
+                            input=types.LiveClientMessage(
+                                tool_response=types.ToolResponse(
+                                    function_responses=[
+                                        types.FunctionResponse(
+                                            name=f_name,
+                                            id=fc.id,
+                                            response={"result": result}
+                                        )
+                                    ]
+                                )
+                            ),
+                            end_of_turn=True
+                        )
+                        print(f"Result sent to Gemini. Waiting for Puck to speak")
 
                 if message.server_content and message.server_content.model_turn:
                     for part in message.server_content.model_turn.parts:
