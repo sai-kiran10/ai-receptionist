@@ -90,6 +90,13 @@ async def voice_stream(websocket: WebSocket):
                 "prebuilt_voice_config": {"voice_name": "Puck"}
             }
         },
+        "voice_activity_detection": {
+            "voice_detection_configs": [{
+                "speech_hop_length_ms": 100,
+                "stop_gap_ms": 600,
+                "pre_speech_silence_detection_threshold_factor": 0.3
+            }]
+        },
         "generation_config": {
             "candidate_count": 1,
         },
@@ -166,9 +173,11 @@ async def voice_stream(websocket: WebSocket):
                     pcm_data = audioop.ulaw2lin(mu_law_data, 2)
                     #print(f"DEBUG Audio: {decoded_data[:10].hex()}...Length: {len(decoded_data)}")
 
+                    boosted_pcm = audioop.mul(pcm_data, 2, 2.0)
+
                     await session.send_realtime_input(
                         media=types.Blob(
-                            data=pcm_data,
+                            data=boosted_pcm,
                             mime_type="audio/pcm;rate=8000"
                         )
                     )
