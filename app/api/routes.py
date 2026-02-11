@@ -120,6 +120,7 @@ async def voice_stream(websocket: WebSocket):
             input="Greet the caller warmly and ask how you can help them today.",
             end_of_turn=True
         )
+        print("Greeting sent to Gemini")
 
         async def send_to_twilio():
             try:
@@ -212,10 +213,11 @@ async def voice_stream(websocket: WebSocket):
                         await asyncio.sleep(0.8)
                         print("🎤 Silence detected — signaling end of turn")
                         try:
-                            await session.send_realtime_input(
+                            await session.send_client_content(
                                 turns=[],
                                 turn_complete=True
                             )
+                            print("turn_complete sent seccessfully")
                         except Exception as e:
                             print(f"❌ turn_complete error: {e}")
 
