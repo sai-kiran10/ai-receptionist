@@ -92,9 +92,6 @@ async def voice_stream(websocket: WebSocket):
                 "prebuilt_voice_config": {"voice_name": "Puck"}
             }
         },
-        "realtime_input_config": {
-            "automatic_activity_detection": {"disabled": True}
-        },
         "tools": [{"function_declarations": [
             {"name": "get_available_slots",
              "description": "Get available slots for a date (YYYY-MM-DD).",
@@ -116,7 +113,7 @@ async def voice_stream(websocket: WebSocket):
     async with client.aio.live.connect(model=MODEL_ID, config=config) as session:
         stream_sid = None
         speech_timeout_task = None
-        is_user_speaking = False
+        print("Gemini session established successfully")
 
         # Trigger greeting
         await session.send(
@@ -199,16 +196,6 @@ async def voice_stream(websocket: WebSocket):
                     pcm_data = audioop.ulaw2lin(mu_law_data, 2)
                     boosted_pcm = audioop.mul(pcm_data, 2, 1.5)
 
-                    if not is_user_speaking:
-                        is_user_speaking = True
-                        print("🎙️ User started speaking")
-                        try:
-                            await session.send_realtime_input(
-                                activity_start=types.ActivityStart()
-                            )
-                        except Exception as e:
-                            print(f"❌ activity_start error: {e}")
-
                     # Stream audio directly to Gemini
                     await session.send_realtime_input(
                         media=types.Blob(
@@ -223,12 +210,11 @@ async def voice_stream(websocket: WebSocket):
 
                     async def silence_detected():
                         await asyncio.sleep(0.8)
-                        nonlocal is_user_speaking
-                        is_user_speaking = False
                         print("🎤 Silence detected — signaling end of turn")
                         try:
                             await session.send_realtime_input(
-                                activity_end=types.ActivityEnd()
+                                turns=[],
+                                turn_complete=True
                             )
                         except Exception as e:
                             print(f"❌ turn_complete error: {e}")
