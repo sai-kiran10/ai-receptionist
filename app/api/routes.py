@@ -77,11 +77,13 @@ async def handle_voice_entry(request: Request):
 
 @router.websocket("/voice/stream")
 async def voice_stream(websocket: WebSocket):
-    """Handles the live audio stream and interruptions."""
     await websocket.accept()
     print("🚀 Voice Stream Connected")
 
-    client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"), http_options={'api_version': 'v1alpha'})
+    client = genai.Client(
+        api_key=os.getenv("GEMINI_API_KEY"),
+        http_options={'api_version': 'v1alpha'}
+    )
 
     config = {
         "response_modalities": ["AUDIO"],
@@ -90,130 +92,161 @@ async def voice_stream(websocket: WebSocket):
                 "prebuilt_voice_config": {"voice_name": "Puck"}
             }
         },
-        "generation_config": {
-            "candidate_count": 1,
+        "realtime_input_config": {
+            "automatic_activity_detection": {"disabled": True}
         },
         "tools": [{"function_declarations": [
-            {"name": "get_available_slots", "description": "Get available slots for a date (YYYY-MM-DD).", 
-             "parameters": {"type": "OBJECT", "properties": {"date": {"type": "STRING", "description": "The date is in YYYY-MM-DD format"}}, "required": ["date"]}},
-            {"name": "hold_slot", "description": "Temporary hold on a slot.", 
+            {"name": "get_available_slots",
+             "description": "Get available slots for a date (YYYY-MM-DD).",
+             "parameters": {"type": "OBJECT", "properties": {"date": {"type": "STRING"}}, "required": ["date"]}},
+            {"name": "hold_slot",
+             "description": "Temporary hold on a slot.",
              "parameters": {"type": "OBJECT", "properties": {"slot_id": {"type": "STRING"}, "phone_number": {"type": "STRING"}}, "required": ["slot_id", "phone_number"]}},
-            {"name": "confirm_appointment", "description": "Finalize a booking.", 
+            {"name": "confirm_appointment",
+             "description": "Finalize a booking.",
              "parameters": {"type": "OBJECT", "properties": {"slot_id": {"type": "STRING"}, "phone_number": {"type": "STRING"}}, "required": ["slot_id", "phone_number"]}}
         ]}],
-        "system_instruction": "You are a receptionist and this is a live call. Respond immediately when the user finishes speaking."
-                              "After you speak, listem immediately for patient's response. If a user asks for slots, call get_available_slots."
-                              " Be natural and brief. If you are looking up information, say 'Let me check that for you' or 'One moment' while the tool is running."
+        "system_instruction": (
+            "You are a friendly medical receptionist on a live phone call. "
+            "Keep responses brief and natural. When looking up info say 'Let me check that for you.' "
+            "Wait for the patient to finish speaking before responding."
+        )
     }
 
     async with client.aio.live.connect(model=MODEL_ID, config=config) as session:
         stream_sid = None
+        speech_timeout_task = None
+        is_user_speaking = False
 
-        '''await session.send_client_content(
-            turns=[types.Content(role="user", parts=[types.Part(text="Hello! Welcome to The Tech Clinic. How you can help you today?")])],
-            turn_complete=True
-        )'''
-        await session.send(input="Please greet the patient and ask how you can help.")
+        # Trigger greeting
+        await session.send(
+            input="Greet the caller warmly and ask how you can help them today.",
+            end_of_turn=True
+        )
 
         async def send_to_twilio():
             try:
                 async for message in session.receive():
-                    print("DEBUG - Received msg from Gemini")
                     if message.tool_call:
                         for fc in message.tool_call.function_calls:
                             f_name = fc.name
                             f_args = fc.args
-                            #print(f"🛠️ Gemini is calling: {f_name} with {f_args}")
-                            
-                            # Execute the actual Python function
+                            print(f"🛠️ Tool called: {f_name} with {f_args}")
+
                             func = FUNCTIONS.get(f_name)
                             try:
                                 result = func(**f_args) if func else {"error": "Function not found"}
+                                print(f"✅ Tool result: {result}")
                             except Exception as e:
-                                print(f"Tool execution crashed: {e}")
-                                result = {"error": "Internal tool error"}
-                            # Send the result BACK to Gemini
-                            '''await session.send(tool_response={
-                                "function_responses": [{
-                                    "id": fc.id,
-                                    "name": f_name,
-                                    "response": {"result": result}
-                                }]
-                            })'''
-                            try:
-                                await session.send(
-                                    input=types.LiveClientMessage(
-                                        tool_response=types.ToolResponse(
-                                            function_responses=[
-                                                types.FunctionResponse(
-                                                    name=f_name,
-                                                    id=fc.id,
-                                                    response={"result": result}
-                                                )
-                                            ]
-                                        )
+                                print(f"❌ Tool error: {e}")
+                                result = {"error": str(e)}
+
+                            await session.send(
+                                input=types.LiveClientMessage(
+                                    tool_response=types.ToolResponse(
+                                        function_responses=[
+                                            types.FunctionResponse(
+                                                name=f_name,
+                                                id=fc.id,
+                                                response={"result": result}
+                                            )
+                                        ]
                                     )
                                 )
-                                await session.send(input="Please tell the user the available slots you found.", end_of_turn=True)
-                            except Exception as send_err:
-                                print(f"Gemini SDK send error: {send_err}")
+                            )
 
                     if message.server_content and message.server_content.model_turn:
                         for part in message.server_content.model_turn.parts:
                             if part.inline_data:
-                                print(f"Gemini is sending {len(part.inline_data.data)} bytes of audio")
                                 raw_audio = part.inline_data.data
-                                #resampled_audio, _ = audioop.ratecv(raw_audio, 2, 1, 24000, 8000, None)
-                                #mulaw_audio = audioop.lin2ulaw(resampled_audio, 2)
-                                #audio_payload = base64.b64encode(mulaw_audio).decode('utf-8')
+                                print(f"🔊 Gemini audio: {len(raw_audio)} bytes")
+
                                 remainder = len(raw_audio) % 6
                                 if remainder > 0:
                                     raw_audio = raw_audio[:-remainder]
+
                                 if len(raw_audio) > 0:
-                                    resampled_audio, _ = audioop.ratecv(raw_audio, 2, 1, 24000, 8000, None)
-                                    mulaw_audio = audioop.lin2ulaw(resampled_audio, 2)
-                                    audio_payload = base64.b64encode(mulaw_audio).decode('utf-8')
-                                    await websocket.send_json({
-                                        "event": "media",
-                                        "streamSid": stream_sid,
-                                        "media": {"payload": audio_payload}
-                                })
-            except Exception as task_err:
-                print(f"Send task crashed: {task_err}")
-                
+                                    try:
+                                        resampled_audio, _ = audioop.ratecv(raw_audio, 2, 1, 24000, 8000, None)
+                                        mulaw_audio = audioop.lin2ulaw(resampled_audio, 2)
+                                        audio_payload = base64.b64encode(mulaw_audio).decode('utf-8')
+
+                                        await websocket.send_json({
+                                            "event": "media",
+                                            "streamSid": stream_sid,
+                                            "media": {"payload": audio_payload}
+                                        })
+                                    except Exception as e:
+                                        print(f"❌ Audio conversion error: {e}")
+
+            except Exception as e:
+                print(f"❌ send_to_twilio error: {e}")
+
         send_task = asyncio.create_task(send_to_twilio())
+
         try:
             while True:
                 message = await websocket.receive_text()
                 data = json.loads(message)
-                
+
                 if data['event'] == "start":
                     stream_sid = data['start']['streamSid']
-                    print(f"Call started, StreamSid: {stream_sid}")
+                    print(f"📞 Call started, StreamSid: {stream_sid}")
+
                 elif data['event'] == "media":
                     payload = data['media']['payload']
                     mu_law_data = base64.b64decode(payload)
                     pcm_data = audioop.ulaw2lin(mu_law_data, 2)
-                    #print(f"DEBUG Audio: {decoded_data[:10].hex()}...Length: {len(decoded_data)}")
+                    boosted_pcm = audioop.mul(pcm_data, 2, 1.5)
 
-                    boosted_pcm = audioop.mul(pcm_data, 2, 2.0)
+                    if not is_user_speaking:
+                        is_user_speaking = True
+                        print("🎙️ User started speaking")
+                        try:
+                            await session.send_realtime_input(
+                                activity_start=types.ActivityStart()
+                            )
+                        except Exception as e:
+                            print(f"❌ activity_start error: {e}")
 
+                    # Stream audio directly to Gemini
                     await session.send_realtime_input(
                         media=types.Blob(
                             data=boosted_pcm,
                             mime_type="audio/pcm;rate=8000"
                         )
                     )
-                    '''await session.send(input={
-                        "data": pcm_data,
-                        "mime_type": "audio/pcm;rate=8000"
-                    })'''
+
+                    # Reset silence detection timer
+                    if speech_timeout_task:
+                        speech_timeout_task.cancel()
+
+                    async def silence_detected():
+                        await asyncio.sleep(0.8)
+                        nonlocal is_user_speaking
+                        is_user_speaking = False
+                        print("🎤 Silence detected — signaling end of turn")
+                        try:
+                            await session.send_realtime_input(
+                                activity_end=types.ActivityEnd()
+                            )
+                        except Exception as e:
+                            print(f"❌ turn_complete error: {e}")
+
+                    speech_timeout_task = asyncio.create_task(silence_detected())
+
                 elif data['event'] == "stop":
+                    print("📞 Call ended")
                     break
-                    
+
         except Exception as e:
-            print(f"Voice Stream Error: {e}")
+            print(f"❌ WebSocket error: {e}")
         finally:
+            if speech_timeout_task:
+                speech_timeout_task.cancel()
             send_task.cancel()
-            await websocket.close()
-            print("Connection closed safely")
+            try:
+                await websocket.close()
+            except:
+                pass
+            print("✅ Connection closed")
