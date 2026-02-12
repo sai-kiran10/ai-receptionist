@@ -117,7 +117,7 @@ async def voice_stream(websocket: WebSocket):
         "system_instruction": (
             "You are a friendly medical receptionist on a live phone call. "
             "Keep responses brief and natural. When looking up info say 'Let me check that for you.' "
-            "Wait for the patient to finish speaking before responding."
+            "Wait for the patient to finish speaking before responding. If patient interrupts you, then stop talking and listen to their request."
         )
     }
 
@@ -174,35 +174,39 @@ async def voice_stream(websocket: WebSocket):
                                                 response={"result": result}
                                             )
                                 )
+                    if message.server_content:
+                        if message.server_content.model_turn:
+                            for part in message.server_content.model_turn.parts:
+                                if part.inline_data:
+                                    raw_audio = part.inline_data.data
+                                    print(f"🔊 Gemini audio: {len(raw_audio)} bytes")
 
-                    if message.server_content and message.server_content.model_turn:
-                        for part in message.server_content.model_turn.parts:
-                            if part.inline_data:
-                                raw_audio = part.inline_data.data
-                                print(f"🔊 Gemini audio: {len(raw_audio)} bytes")
+                                    remainder = len(raw_audio) % 6
+                                    if remainder > 0:
+                                        raw_audio = raw_audio[:-remainder]
 
-                                remainder = len(raw_audio) % 6
-                                if remainder > 0:
-                                    raw_audio = raw_audio[:-remainder]
+                                    if len(raw_audio) > 0:
+                                        try:
+                                            resampled_audio, _ = audioop.ratecv(raw_audio, 2, 1, 24000, 8000, None)
+                                            mulaw_audio = audioop.lin2ulaw(resampled_audio, 2)
+                                            audio_payload = base64.b64encode(mulaw_audio).decode('utf-8')
+                                            await websocket.send_json({
+                                                "event": "media",
+                                                "streamSid": stream_sid,
+                                                "media": {"payload": audio_payload}
+                                            })
+                                        except Exception as e:
+                                            print(f"❌ Audio conversion error: {e}")
 
-                                if len(raw_audio) > 0:
-                                    try:
-                                        resampled_audio, _ = audioop.ratecv(raw_audio, 2, 1, 24000, 8000, None)
-                                        mulaw_audio = audioop.lin2ulaw(resampled_audio, 2)
-                                        audio_payload = base64.b64encode(mulaw_audio).decode('utf-8')
-                                        await websocket.send_json({
-                                            "event": "media",
-                                            "streamSid": stream_sid,
-                                            "media": {"payload": audio_payload}
-                                        })
-                                    except Exception as e:
-                                        print(f"❌ Audio conversion error: {e}")
-                    if message.server_content.turn_complete:
-                        print("Gemini turn complete - Listening for user")
-                        greeting_done.set()
+                        if message.server_content.turn_complete:
+                            print("✅ Gemini turn complete - Listening for user")
+                            greeting_done.set()
 
             except Exception as e:
-                print(f"❌ send_to_twilio error: {e}")
+                print(f"💥 send_to_twilio CRASHED: {e}")
+                traceback.print_exc()
+            finally:
+                print("⚠️ send_to_twilio EXITED")
 
         async def send_to_gemini():
             """Reads from queue and forwards audio to Gemini — runs independently"""
@@ -232,7 +236,7 @@ async def voice_stream(websocket: WebSocket):
                             await session.send_realtime_input(
                                 media=types.Blob(
                                     data=bytes(audio_buffer[:SEND_SIZE]),
-                                    mime_type="audio/pcm;rate=8000"
+                                    mime_type="audio/pcm;rate=16000"
                                     )
                                 )
                             audio_buffer = audio_buffer[SEND_SIZE:]
@@ -243,7 +247,7 @@ async def voice_stream(websocket: WebSocket):
                             await session.send_realtime_input(
                                 media=types.Blob(
                                     data=bytes(audio_buffer),
-                                    mime_type="audio/pcm;rate=8000"
+                                    mime_type="audio/pcm;rate=16000"
                                 )
                             )
                             print(f"Flushed {len(audio_buffer)} bytes on timeout")
@@ -288,7 +292,8 @@ async def voice_stream(websocket: WebSocket):
                     boosted_pcm = audioop.mul(pcm_data, 2, 1.5)
                     print(f"Twilio media received, queue size: {audio_queue.qsize()}")
                     #Just enqueue — never awaits Gemini directly in this loop
-                    await audio_queue.put(boosted_pcm)
+                    pcm_16k, _ = audioop.ratecv(boosted_pcm, 2, 1, 8000, 16000, None)
+                    await audio_queue.put(pcm_16k)
 
                 elif data['event'] == "stop":
                     print("📞 Call ended")
