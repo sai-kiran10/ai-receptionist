@@ -206,59 +206,48 @@ async def voice_stream(websocket: WebSocket):
 
         async def send_to_gemini():
             """Reads from queue and forwards audio to Gemini — runs independently"""
-            silent_chunk = b'\x00' * 3200
-            audio_buffer = bytearray()
-            CHUNK_SIZE = 3200
-
-            print("Waiting for greeting to finish")
             await greeting_done.wait()
-            print(f"Now listening - queue has {audio_queue.qsize()} items waiting")
+            print(f"Now listening - draining {audio_queue.qsize()} pre-greeting items")
 
             while not audio_queue.empty():
                 audio_queue.get_nowait()
                 audio_queue.task_done()
-            print("Drained pre-greeting audio queue")
+            print("Queue drained, ready for user speech")
+
+            #silent_chunk = b'\x00' * 3200
+            audio_buffer = bytearray()
+            SEND_SIZE = 6400
+
             try:
                 while True:
                     try:
-                        pcm_data = await asyncio.wait_for(audio_queue.get(), timeout=3.0)
+                        pcm_data = await asyncio.wait_for(audio_queue.get(), timeout=2.0)
                         if pcm_data is None:  # Poison pill — shut down
                             break
                         audio_buffer.extend(pcm_data)
                         audio_queue.task_done()
-
+                        
                         #print(f"Sending {len(pcm_data)} bytes to Gemini")
-                        if len(audio_buffer) >= CHUNK_SIZE:
-                            chunk_to_send = bytes(audio_buffer[:CHUNK_SIZE])
-                            audio_buffer = audio_buffer[CHUNK_SIZE:]
+                        while len(audio_buffer) >= SEND_SIZE:
                             await session.send_realtime_input(
                                 media=types.Blob(
-                                    data=chunk_to_send,
+                                    data=bytes(audio_buffer[:SEND_SIZE]),
                                     mime_type="audio/pcm;rate=8000"
+                                    )
                                 )
-                            )
-                            print(f"Sent {len(chunk_to_send)} byte chunk to Gemini")
+                            audio_buffer = audio_buffer[SEND_SIZE:]
+                            print(f"Sent {SEND_SIZE} bytes")
 
-                        #audio_queue.task_done()
                     except asyncio.TimeoutError:
                         if len(audio_buffer) > 0:
-                            print(f"Flushing {len(audio_buffer)} bytes on silence")
                             await session.send_realtime_input(
                                 media=types.Blob(
                                     data=bytes(audio_buffer),
                                     mime_type="audio/pcm;rate=8000"
                                 )
                             )
+                            print(f"Flushed {len(audio_buffer)} bytes on timeout")
                             audio_buffer = bytearray()
-                        else:
-                            print("Keepalive silence")
-                            await session.send_realtime_input(
-                                media=types.Blob(
-                                    data=silent_chunk,
-                                    mime_type="audio/pcm;rate=8000"
-                                )
-                            )
-                            print("Keepalive sent OK")
             except Exception as e:
                 print(f"❌ send_to_gemini error: {e}")
                 traceback.print_exc()
