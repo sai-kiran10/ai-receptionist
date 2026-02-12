@@ -124,12 +124,12 @@ async def voice_stream(websocket: WebSocket):
     async with client.aio.live.connect(model=MODEL_ID, config=config) as session:
         stream_sid = None
         audio_queue = asyncio.Queue()  # Queue decouples WebSocket from Gemini
-        
+        greeting_done = asyncio.Event()
         print("✅ Gemini session established successfully")
 
         await session.send_client_content(
             #input="Greet the caller warmly and ask how you can help them today.",
-            turns={"role": "user", "parts": [{"text": "Greet the caller warmly and ask how you can help them today."}]},
+            turns={"role": "user", "parts": [{"text": "Greet the caller warmly and ask how you can help them today. Do not end the session; wait for their response."}]},
             turn_complete=True
         )
         print("✅ Greeting sent to Gemini")
@@ -197,26 +197,33 @@ async def voice_stream(websocket: WebSocket):
                                         })
                                     except Exception as e:
                                         print(f"❌ Audio conversion error: {e}")
+                    if message.server_content.turn_complete:
+                        print("Gemini turn complete - Listening for user")
+                        greeting_done.set()
+
             except Exception as e:
                 print(f"❌ send_to_twilio error: {e}")
 
         async def send_to_gemini():
             """Reads from queue and forwards audio to Gemini — runs independently"""
             silent_chunk = b'\x00' * 1600
+            print("Waiting for greeting to finish")
+            await greeting_done.wait()
+            print("Now listening for user audio")
             try:
                 while True:
                     try:
                         pcm_data = await asyncio.wait_for(audio_queue.get(), timeout=3.0)
                         if pcm_data is None:  # Poison pill — shut down
                             break
-                        print(f"Sending {len(pcm_data)} bytes to Gemini")
+                        #print(f"Sending {len(pcm_data)} bytes to Gemini")
                         await session.send_realtime_input(
                             media=types.Blob(
                                 data=pcm_data,
                                 mime_type="audio/pcm;rate=8000"
                             )
                         )
-                        print("Sent OK")
+                        #print("Sent OK")
                         audio_queue.task_done()
                     except asyncio.TimeoutError:
                         print("Keepalive silence")
@@ -232,17 +239,22 @@ async def voice_stream(websocket: WebSocket):
                 traceback.print_exc()
 
         # Both tasks run concurrently — neither blocks the other
-        send_task = asyncio.create_task(send_to_twilio())
-        gemini_task = asyncio.create_task(send_to_gemini())
+        #send_task = asyncio.create_task(send_to_twilio())
+        #gemini_task = asyncio.create_task(send_to_gemini())
         #keepalive_task = asyncio.create_task(keepalive())
 
         def task_exception_handler(task):
             if not task.cancelled():
-                exc = task.exception()
-                if exc:
-                    print(f"Task crashed: {exc}")
-                    traceback.print_tb(exc.__traceback__)
+                try:
+                    exc = task.exception()
+                    if exc:
+                        print(f"Task crashed: {exc}")
+                        traceback.print_tb(exc.__traceback__)
+                except Exception:
+                    pass
 
+        send_task = asyncio.create_task(send_to_twilio())
+        gemini_task = asyncio.create_task(send_to_gemini())
         send_task.add_done_callback(task_exception_handler)
         gemini_task.add_done_callback(task_exception_handler)
 
@@ -261,7 +273,7 @@ async def voice_stream(websocket: WebSocket):
                     pcm_data = audioop.ulaw2lin(mu_law_data, 2)
                     boosted_pcm = audioop.mul(pcm_data, 2, 1.5)
 
-                    # 👇 Just enqueue — never awaits Gemini directly in this loop
+                    #Just enqueue — never awaits Gemini directly in this loop
                     await audio_queue.put(boosted_pcm)
 
                 elif data['event'] == "stop":
