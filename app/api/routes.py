@@ -207,6 +207,9 @@ async def voice_stream(websocket: WebSocket):
         async def send_to_gemini():
             """Reads from queue and forwards audio to Gemini — runs independently"""
             silent_chunk = b'\x00' * 3200
+            audio_buffer = bytearray()
+            CHUNK_SIZE = 3200
+
             print("Waiting for greeting to finish")
             await greeting_done.wait()
             print(f"Now listening - queue has {audio_queue.qsize()} items waiting")
@@ -221,24 +224,41 @@ async def voice_stream(websocket: WebSocket):
                         pcm_data = await asyncio.wait_for(audio_queue.get(), timeout=3.0)
                         if pcm_data is None:  # Poison pill — shut down
                             break
-                        #print(f"Sending {len(pcm_data)} bytes to Gemini")
-                        await session.send_realtime_input(
-                            media=types.Blob(
-                                data=pcm_data,
-                                mime_type="audio/pcm;rate=8000"
-                            )
-                        )
-                        #print("Sent OK")
+                        audio_buffer.extend(pcm_data)
                         audio_queue.task_done()
-                    except asyncio.TimeoutError:
-                        print("Keepalive silence")
-                        await session.send_realtime_input(
-                            media=types.Blob(
-                                data=silent_chunk,
-                                mime_type="audio/pcm;rate=8000"
+
+                        #print(f"Sending {len(pcm_data)} bytes to Gemini")
+                        if len(audio_buffer) >= CHUNK_SIZE:
+                            chunk_to_send = bytes(audio_buffer[:CHUNK_SIZE])
+                            audio_buffer = audio_buffer[CHUNK_SIZE:]
+                            await session.send_realtime_input(
+                                media=types.Blob(
+                                    data=chunk_to_send,
+                                    mime_type="audio/pcm;rate=8000"
+                                )
                             )
-                        )
-                        print("Keepalive sent OK")
+                            print(f"Sent {len(chunk_to_send)} byte chunk to Gemini")
+
+                        #audio_queue.task_done()
+                    except asyncio.TimeoutError:
+                        if len(audio_buffer) > 0:
+                            print(f"Flushing {len(audio_buffer)} bytes on silence")
+                            await session.send_realtime_input(
+                                media=types.Blob(
+                                    data=bytes(audio_buffer),
+                                    mime_type="audio/pcm;rate=8000"
+                                )
+                            )
+                            audio_buffer = bytearray()
+                        else:
+                            print("Keepalive silence")
+                            await session.send_realtime_input(
+                                media=types.Blob(
+                                    data=silent_chunk,
+                                    mime_type="audio/pcm;rate=8000"
+                                )
+                            )
+                            print("Keepalive sent OK")
             except Exception as e:
                 print(f"❌ send_to_gemini error: {e}")
                 traceback.print_exc()
