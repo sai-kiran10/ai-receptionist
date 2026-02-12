@@ -9,6 +9,11 @@ import os, json, base64, asyncio
 from google import genai
 from google.genai import types
 import audioop
+import google.genai.live as _live_module
+from websockets.asyncio.client import connect as _orig_connect
+import traceback
+
+os.environ['WEBSOCKETS_MAX_SIZE'] = str(2**24)
 
 router = APIRouter()
 llm = GeminiService()
@@ -19,6 +24,12 @@ FUNCTIONS = {
     "hold_slot": hold_slot,
     "confirm_appointment": confirm_appointment
 }
+
+def _patched_ws_connect(uri, **kwargs):
+    kwargs['ping_interval'] = 10
+    kwargs['ping_timeout'] = None
+    return _orig_connect(uri, **kwargs)
+_live_module.ws_connect = _patched_ws_connect
 
 @router.post("/slots/hold")
 def hold(request: HoldSlotRequest):
@@ -113,6 +124,7 @@ async def voice_stream(websocket: WebSocket):
     async with client.aio.live.connect(model=MODEL_ID, config=config) as session:
         stream_sid = None
         audio_queue = asyncio.Queue()  # Queue decouples WebSocket from Gemini
+        
         print("✅ Gemini session established successfully")
 
         await session.send_client_content(
@@ -197,28 +209,42 @@ async def voice_stream(websocket: WebSocket):
                         pcm_data = await asyncio.wait_for(audio_queue.get(), timeout=3.0)
                         if pcm_data is None:  # Poison pill — shut down
                             break
+                        print(f"Sending {len(pcm_data)} bytes to Gemini")
                         await session.send_realtime_input(
-                            audio=types.Blob(
+                            media=types.Blob(
                                 data=pcm_data,
                                 mime_type="audio/pcm;rate=8000"
                             )
                         )
+                        print("Sent OK")
                         audio_queue.task_done()
                     except asyncio.TimeoutError:
                         print("Keepalive silence")
                         await session.send_realtime_input(
-                            audio=types.Blob(
+                            media=types.Blob(
                                 data=silent_chunk,
                                 mime_type="audio/pcm;rate=8000"
                             )
                         )
+                        print("Keepalive sent OK")
             except Exception as e:
                 print(f"❌ send_to_gemini error: {e}")
+                traceback.print_exc()
 
         # Both tasks run concurrently — neither blocks the other
         send_task = asyncio.create_task(send_to_twilio())
         gemini_task = asyncio.create_task(send_to_gemini())
         #keepalive_task = asyncio.create_task(keepalive())
+
+        def task_exception_handler(task):
+            if not task.cancelled():
+                exc = task.exception()
+                if exc:
+                    print(f"Task crashed: {exc}")
+                    traceback.print_tb(exc.__traceback__)
+
+        send_task.add_done_callback(task_exception_handler)
+        gemini_task.add_done_callback(task_exception_handler)
 
         try:
             while True:
