@@ -206,10 +206,15 @@ async def voice_stream(websocket: WebSocket):
 
         async def send_to_gemini():
             """Reads from queue and forwards audio to Gemini — runs independently"""
-            silent_chunk = b'\x00' * 1600
+            silent_chunk = b'\x00' * 3200
             print("Waiting for greeting to finish")
             await greeting_done.wait()
-            print("Now listening for user audio")
+            print(f"Now listening - queue has {audio_queue.qsize()} items waiting")
+
+            while not audio_queue.empty():
+                audio_queue.get_nowait()
+                audio_queue.task_done()
+            print("Drained pre-greeting audio queue")
             try:
                 while True:
                     try:
@@ -272,13 +277,19 @@ async def voice_stream(websocket: WebSocket):
                     mu_law_data = base64.b64decode(payload)
                     pcm_data = audioop.ulaw2lin(mu_law_data, 2)
                     boosted_pcm = audioop.mul(pcm_data, 2, 1.5)
-
+                    print(f"Twilio media received, queue size: {audio_queue.qsize()}")
                     #Just enqueue — never awaits Gemini directly in this loop
                     await audio_queue.put(boosted_pcm)
 
                 elif data['event'] == "stop":
                     print("📞 Call ended")
                     break
+
+                elif data['event'] == "mark":
+                    print(f"Mark: {data}")
+
+                else:
+                    print(f"Unknown event: {data['event']}")
 
         except Exception as e:
             print(f"❌ WebSocket error: {e}")
