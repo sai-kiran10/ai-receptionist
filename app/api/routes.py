@@ -12,7 +12,7 @@ import audioop
 
 router = APIRouter()
 llm = GeminiService()
-MODEL_ID = "gemini-2.5-flash-native-audio-preview-12-2025"
+MODEL_ID = "gemini-2.5-flash-native-audio-preview-09-2025"
 
 FUNCTIONS = {
     "get_available_slots": get_available_slots,
@@ -112,7 +112,7 @@ async def voice_stream(websocket: WebSocket):
 
     async with client.aio.live.connect(model=MODEL_ID, config=config) as session:
         stream_sid = None
-        audio_queue = asyncio.Queue()  # 👈 Queue decouples WebSocket from Gemini
+        audio_queue = asyncio.Queue()  # Queue decouples WebSocket from Gemini
         print("✅ Gemini session established successfully")
 
         await session.send(
@@ -121,10 +121,26 @@ async def voice_stream(websocket: WebSocket):
         )
         print("✅ Greeting sent to Gemini")
 
+        async def keepalive():
+            """Send silent audio every 5s to prevent Gemini session timeout"""
+            silent_chunk = b'\x00' * 1600
+            while True:
+                await asyncio.sleep(5)
+                try:
+                    await session.send_realtime_input(
+                        media=types.Blob(
+                            data=silent_chunk,
+                            mime_type="audio/pcm;rate=8000"
+                        )
+                    )
+                except Exception:
+                    break
+
         async def send_to_twilio():
             """Receives audio from Gemini and forwards to Twilio"""
             try:
                 async for message in session.receive():
+                    print(f"DEBUG msg type: server_content={bool(message.server_content)}, tool_call={bool(message.tool_call)}, setup_complete={bool(message.setup_complete)}")
                     if message.tool_call:
                         for fc in message.tool_call.function_calls:
                             f_name = fc.name
@@ -139,8 +155,7 @@ async def voice_stream(websocket: WebSocket):
                                 result = {"error": str(e)}
 
                             await session.send(
-                                input=types.LiveClientMessage(
-                                    tool_response=types.ToolResponse(
+                                input=types.LiveClientToolResponse(
                                         function_responses=[
                                             types.FunctionResponse(
                                                 name=f_name,
@@ -150,7 +165,6 @@ async def voice_stream(websocket: WebSocket):
                                         ]
                                     )
                                 )
-                            )
 
                     if message.server_content and message.server_content.model_turn:
                         for part in message.server_content.model_turn.parts:
@@ -179,24 +193,35 @@ async def voice_stream(websocket: WebSocket):
 
         async def send_to_gemini():
             """Reads from queue and forwards audio to Gemini — runs independently"""
+            silent_chunk = b'\x00' * 1600
             try:
                 while True:
-                    pcm_data = await audio_queue.get()
-                    if pcm_data is None:  # Poison pill — shut down
-                        break
-                    await session.send_realtime_input(
-                        media=types.Blob(
-                            data=pcm_data,
-                            mime_type="audio/pcm;rate=8000"
+                    try:
+                        pcm_data = await asyncio.wait_for(audio_queue.get(), timeout=3.0)
+                        if pcm_data is None:  # Poison pill — shut down
+                            break
+                        await session.send_realtime_input(
+                            media=types.Blob(
+                                data=pcm_data,
+                                mime_type="audio/pcm;rate=8000"
+                            )
                         )
-                    )
-                    audio_queue.task_done()
+                        audio_queue.task_done()
+                    except asyncio.TimeoutError:
+                        print("Sending keepalive silence")
+                        await session.send_realtime_input(
+                            media=types.Blob(
+                                data=silent_chunk,
+                                mime_type="audio/pcm;rate=8000"
+                            )
+                        )
             except Exception as e:
                 print(f"❌ send_to_gemini error: {e}")
 
         # Both tasks run concurrently — neither blocks the other
         send_task = asyncio.create_task(send_to_twilio())
         gemini_task = asyncio.create_task(send_to_gemini())
+        keepalive_task = asyncio.create_task(keepalive())
 
         try:
             while True:
@@ -226,6 +251,7 @@ async def voice_stream(websocket: WebSocket):
             await audio_queue.put(None)  # Shut down gemini_task cleanly
             send_task.cancel()
             gemini_task.cancel()
+            keepalive_task.cancel()
             try:
                 await websocket.close()
             except:
