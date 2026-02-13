@@ -118,6 +118,8 @@ async def voice_stream(websocket: WebSocket):
             "4. NEVER say an appointment is booked or confirmed without actually calling confirm_appointment first.\n"
             "5. NEVER invent or hallucinate slot IDs, times, or confirmation details.\n"
             "6. Always get the patient's phone number before calling hold_slot or confirm_appointment.\n"
+            "7. When patient calls and asks if they have any appointments booked, just ask for their phone number and search using that number.\n"
+            "8. If asked to resend a confirmation, call confirm_appointment again with the same slot_id and phone_number.\n"
             "Keep responses brief and natural. Say 'Let me check that for you' before tool calls. "
             "Wait for the patient to finish speaking before responding."
         )
