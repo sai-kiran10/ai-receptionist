@@ -20,17 +20,14 @@ twilio_client = Client(account_sid, auth_token)
 def send_sms_notification(phone_number: str, message: str):
     """Sends an SMS notification via Twilio WhatsApp Sandbox."""
     try:
-        # Normalize to E.164: strip any existing prefix, add +1 for bare 10-digit US numbers
+        # Normalize to E.164 — Twilio requires +1XXXXXXXXXX format
         raw = phone_number.replace("whatsapp:", "").replace("+", "").strip()
         if len(raw) == 10:
             raw = "1" + raw   # add US country code
         e164 = "+" + raw
-
         to_whatsapp = f"whatsapp:{e164}"
         from_whatsapp = f"whatsapp:{twilio_number}"
-
         print(f"DEBUG: Sending WhatsApp to {to_whatsapp} from {from_whatsapp}")
-
         twilio_client.messages.create(
             body=message,
             from_=from_whatsapp,
@@ -74,7 +71,7 @@ def sanitize_decimal(data):
 
 # ----------------- AI-Facing Tools -----------------
 
-def hold_slot(slot_id: str, phone_number: str, hold_seconds: int = 60):
+def hold_slot(slot_id: str, phone_number: str, hold_seconds: int = 300):  # 5 min default
     """
     Temporarily holds an appointment slot. 
     
@@ -93,13 +90,14 @@ def hold_slot(slot_id: str, phone_number: str, hold_seconds: int = 60):
     try:
         response = slots_table.update_item(
             Key={"slot_id": slot_id},
-            UpdateExpression="SET #s = :held, hold_expires_at = :ttl, version = version + :inc",
+            UpdateExpression="SET #s = :held, hold_expires_at = :ttl, held_by = :phone, version = version + :inc",
             ConditionExpression="#s = :avail",
             ExpressionAttributeNames={"#s": "status"},
             ExpressionAttributeValues={
-                ":avail": "AVAILABLE", 
-                ":held": "HELD", 
-                ":ttl": ttl, 
+                ":avail": "AVAILABLE",
+                ":held": "HELD",
+                ":ttl": ttl,
+                ":phone": phone_number,
                 ":inc": 1
             },
             ReturnValues="ALL_NEW"
@@ -122,11 +120,10 @@ def hold_slot(slot_id: str, phone_number: str, hold_seconds: int = 60):
 
 def confirm_appointment(slot_id: str, phone_number: str):
     """
-    Finalizes a booking that is currently being held.
-    Call this ONLY after the user confirms they definitely want to book the appointment.
-    Uses a DynamoDB transaction so the slot update and appointment record are atomic —
-    if anything fails mid-way, neither write persists (no ghost bookings).
-    After finalizing the appointment send an SMS.
+    Finalizes a booking. Handles two cases atomically:
+      - Normal path: slot is HELD (by this caller) and hold hasn't expired
+      - Fast path:   slot is still AVAILABLE (Gemini skipped hold_slot)
+    Uses a DynamoDB transaction so slot update + appointment record are atomic.
     Args:
         slot_id: The unique ID of the slot (e.g., '2026-01-22-10:00')
         phone_number: The user's contact number.
@@ -135,9 +132,52 @@ def confirm_appointment(slot_id: str, phone_number: str):
     now_ts = current_ts()
     appointment_id = str(uuid.uuid4())
 
+    # First, read the current slot state so we know which condition to use
     try:
-        # Single atomic transaction: update slot AND create appointment record together.
-        # If either write fails, both are rolled back — no ghost bookings possible.
+        res = slots_table.get_item(Key={"slot_id": slot_id})
+        slot = res.get("Item")
+        if not slot:
+            return {"success": False, "message": f"Slot {slot_id} not found."}
+
+        status = slot.get("status")
+        held_by = slot.get("held_by")
+        hold_expires_at = int(slot.get("hold_expires_at", 0))
+
+        if status == "BOOKED":
+            return {"success": False, "message": "This slot is already booked by someone else. Please choose a different time."}
+
+        if status == "HELD":
+            # If held by a different caller and hold hasn't expired, reject
+            if held_by and held_by != phone_number and hold_expires_at > now_ts:
+                return {"success": False, "message": "This slot is currently being held by another caller. Please choose a different time or try again in a few minutes."}
+            # If hold expired, treat as available
+            if hold_expires_at <= now_ts:
+                status = "AVAILABLE"
+
+    except ClientError as e:
+        return {"success": False, "message": f"Could not read slot: {str(e)}"}
+
+    # Build the condition based on current status
+    if status == "HELD":
+        # Slot is held by this caller — confirm it directly
+        condition = "#s = :held AND hold_expires_at > :now"
+        expr_values = {
+            ":held": "HELD",
+            ":booked": "BOOKED",
+            ":now": now_ts,
+            ":false": False
+        }
+    else:
+        # Slot is available (or hold expired) — grab and confirm in one shot
+        condition = "#s = :avail"
+        expr_values = {
+            ":avail": "AVAILABLE",
+            ":booked": "BOOKED",
+            ":now": now_ts,
+            ":false": False
+        }
+
+    try:
         dynamodb = boto3.resource('dynamodb', region_name=os.getenv('AWS_REGION', 'us-east-1'))
         dynamodb.meta.client.transact_write(
             TransactItems=[
@@ -146,14 +186,9 @@ def confirm_appointment(slot_id: str, phone_number: str):
                         "TableName": slots_table.name,
                         "Key": {"slot_id": slot_id},
                         "UpdateExpression": "SET #s = :booked, is_available = :false",
-                        "ConditionExpression": "#s = :held AND hold_expires_at > :now",
+                        "ConditionExpression": condition,
                         "ExpressionAttributeNames": {"#s": "status"},
-                        "ExpressionAttributeValues": {
-                            ":held": "HELD",
-                            ":booked": "BOOKED",
-                            ":now": now_ts,
-                            ":false": False
-                        }
+                        "ExpressionAttributeValues": expr_values
                     }
                 },
                 {
@@ -166,7 +201,6 @@ def confirm_appointment(slot_id: str, phone_number: str):
                             "status": "CONFIRMED",
                             "created_at": current_iso()
                         },
-                        # Extra safety: don't overwrite if appointment_id somehow collides
                         "ConditionExpression": "attribute_not_exists(appointment_id)"
                     }
                 }
@@ -186,10 +220,9 @@ def confirm_appointment(slot_id: str, phone_number: str):
         code = e.response['Error']['Code']
         if code == 'TransactionCanceledException':
             reasons = e.response.get('CancellationReasons', [])
-            # First item is the slot update — if that condition failed, hold expired or slot taken
             if reasons and reasons[0].get('Code') == 'ConditionalCheckFailed':
-                return {"success": False, "message": "Hold expired or slot was already booked. Please try hold the slot again."}
-            return {"success": False, "message": "Booking transaction failed. Please try again."}
+                return {"success": False, "message": "Slot was just taken by another caller. Please choose a different time."}
+            return {"success": False, "message": "Booking failed — please try again."}
         return {"success": False, "message": f"Database error: {str(e)}"}
 
 def get_appointments_by_phone(phone_number: str):
@@ -279,3 +312,4 @@ def reschedule_appointment(appointment_id: str, new_slot_id: str):
         return {"success": True, "message": f"Appointment moved to {new_slot_id}. Please confirm the new time."}
     except Exception as e:
         return {"success": False, "error": str(e)}
+    

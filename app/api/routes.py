@@ -172,7 +172,7 @@ async def voice_stream(websocket: WebSocket):
             "7. To resend a confirmation SMS, call confirm_appointment again with the same slot_id and phone_number.\n"
             "8. To check a patient's existing bookings, call get_appointments_by_phone.\n"
             "9. NEVER say you sent a message without calling a tool that actually sends it.\n"
-            "10. Ask for patient name, phone number and their preferred appointment time once and remember it through the session. Don't ask them again and again.\n"
+            "10. Ask for patient name, phone number and their preferred appointment time once and remember it throughout. Don't ask them again and again.\n"
             "Keep responses brief and natural. You must say 'Let me check that for you' before tool calls or while you are checking for a slot. NEVER stay silent at any moment in the call. "
             "Wait for the patient to finish speaking before responding. If they speak in between then stop and listen to their request. Say 'Goodbye, Have a nice day' when patient is about to hang up the call."
         )
