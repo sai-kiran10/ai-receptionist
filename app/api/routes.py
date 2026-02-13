@@ -33,13 +33,13 @@ _live_module.ws_connect = _patched_ws_connect
 
 @router.post("/slots/hold")
 def hold(request: HoldSlotRequest):
-    return hold_slot(slot_id=request.slot_id, 
+    return hold_slot(slot_id=request.slot_id,
                      phone_number=request.phone_number,
                      hold_seconds=request.hold_seconds)
 
 @router.post("/appointments/confirm")
 def confirm(request: ConfirmAppointmentRequest):
-    return confirm_appointment(slot_id=request.slot_id, 
+    return confirm_appointment(slot_id=request.slot_id,
                                phone_number=request.phone_number)
 
 @router.get("/slots")
@@ -51,38 +51,27 @@ async def chat_with_receptionist(
     user_message: str,
     llm: LLMInterface = Depends(GeminiService)
 ):
-    """
-    This is the endpoint Twilio will call.
-    It takes what the user says and lets LLM handle it.
-    """
     response = llm.generate_response(user_message)
     return {"reply": response}
 
 @router.post("/sms/webhook")
 async def handle_sms(From: str = Form(...), Body: str = Form(...)):
     clean_phone = From.replace("whatsapp:", "")
-
     prompt_with_context = f"[User Phone: {clean_phone}] {Body}"
-    
     ai_reply = llm.generate_response(prompt_with_context)
-
     response = MessagingResponse()
     response.message(ai_reply)
-
     return Response(content=str(response), media_type="application/xml")
 
 @router.post("/voice/webhook")
 async def handle_voice_entry(request: Request):
     """Initial entry point for the call. Connects to WebSocket."""
     response = VoiceResponse()
-    
     host = request.headers.get("host")
     stream_url = f"wss://{host}/api/v1/voice/stream"
-
     connect = Connect()
     connect.stream(url=stream_url)
     response.append(connect)
-
     print(f"Streaming to: {stream_url}")
     return Response(content=str(response), media_type="application/xml")
 
@@ -104,54 +93,52 @@ async def voice_stream(websocket: WebSocket):
             }
         },
         "tools": [{"function_declarations": [
-            {"name": "get_available_slots",
-             "description": "Get available slots for a date (YYYY-MM-DD).",
-             "parameters": {"type": "OBJECT", "properties": {"date": {"type": "STRING"}}, "required": ["date"]}},
-            {"name": "hold_slot",
-             "description": "Temporary hold on a slot.",
-             "parameters": {"type": "OBJECT", "properties": {"slot_id": {"type": "STRING"}, "phone_number": {"type": "STRING"}}, "required": ["slot_id", "phone_number"]}},
-            {"name": "confirm_appointment",
-             "description": "Finalize a booking.",
-             "parameters": {"type": "OBJECT", "properties": {"slot_id": {"type": "STRING"}, "phone_number": {"type": "STRING"}}, "required": ["slot_id", "phone_number"]}}
+            {
+                "name": "get_available_slots",
+                "description": "Get available appointment slots for a given date (YYYY-MM-DD). MUST be called before discussing any available times.",
+                "parameters": {"type": "OBJECT", "properties": {"date": {"type": "STRING"}}, "required": ["date"]}
+            },
+            {
+                "name": "hold_slot",
+                "description": "Place a temporary hold on an appointment slot. MUST be called before telling the patient a slot is reserved.",
+                "parameters": {"type": "OBJECT", "properties": {"slot_id": {"type": "STRING"}, "phone_number": {"type": "STRING"}}, "required": ["slot_id", "phone_number"]}
+            },
+            {
+                "name": "confirm_appointment",
+                "description": "Permanently confirm and book an appointment. MUST be called before telling the patient their appointment is confirmed.",
+                "parameters": {"type": "OBJECT", "properties": {"slot_id": {"type": "STRING"}, "phone_number": {"type": "STRING"}}, "required": ["slot_id", "phone_number"]}
+            }
         ]}],
         "system_instruction": (
-            "You are a friendly medical receptionist on a live phone call. "
-            "Keep responses brief and natural. When looking up info say 'Let me check that for you.' "
+            "You are a medical receptionist AI on a live phone call. "
+            "CRITICAL RULES - you MUST follow these without exception:\n"
+            "1. You MUST call get_available_slots before discussing any appointment times.\n"
+            "2. You MUST call hold_slot before saying a slot is reserved.\n"
+            "3. You MUST call confirm_appointment before saying a booking is confirmed.\n"
+            "4. NEVER say an appointment is booked or confirmed without actually calling confirm_appointment first.\n"
+            "5. NEVER invent or hallucinate slot IDs, times, or confirmation details.\n"
+            "6. Always get the patient's phone number before calling hold_slot or confirm_appointment.\n"
+            "Keep responses brief and natural. Say 'Let me check that for you' before tool calls. "
             "Wait for the patient to finish speaking before responding."
         )
     }
 
     async with client.aio.live.connect(model=MODEL_ID, config=config) as session:
         stream_sid = None
-        audio_queue = asyncio.Queue()  # Queue decouples WebSocket from Gemini
+        audio_queue = asyncio.Queue()
         greeting_done = asyncio.Event()
         print("✅ Gemini session established successfully")
 
+        # FIX: use send_client_content for greeting (reliably triggers response)
         await session.send_client_content(
-            #input="Greet the caller warmly and ask how you can help them today.",
-            turns={"role": "user", "parts": [{"text": "Greet the caller warmly and ask how you can help them today. Do not end the session; wait for their response."}]},
+            turns={"role": "user", "parts": [{"text": "Greet the caller warmly and ask how you can help them today."}]},
             turn_complete=True
         )
         print("✅ Greeting sent to Gemini")
 
-        '''async def keepalive():
-            """Send silent audio every 5s to prevent Gemini session timeout"""
-            silent_chunk = b'\x00' * 1600
-            while True:
-                await asyncio.sleep(5)
-                try:
-                    await session.send_realtime_input(
-                        media=types.Blob(
-                            data=silent_chunk,
-                            mime_type="audio/pcm;rate=8000"
-                        )
-                    )
-                except Exception:
-                    break'''
-
         async def send_to_twilio():
             """Receives audio from Gemini and forwards to Twilio.
-            session.receive() ends after each turn (by design), so we loop to catch all turns.
+            FIX: session.receive() ends after each turn by design — while True restarts it.
             """
             print("🔁 send_to_twilio started")
             try:
@@ -160,6 +147,7 @@ async def voice_stream(websocket: WebSocket):
                     async for message in session.receive():
                         print(f"DEBUG msg type: server_content={bool(message.server_content)}, tool_call={bool(message.tool_call)}, setup_complete={bool(message.setup_complete)}")
 
+                        # FIX: tool_call arrives in its own turn — handle it here
                         if message.tool_call:
                             for fc in message.tool_call.function_calls:
                                 f_name = fc.name
@@ -180,15 +168,18 @@ async def voice_stream(websocket: WebSocket):
                                     )
                                 )
 
+                        # FIX: guard ALL server_content access inside one if block
                         if message.server_content:
                             if message.server_content.model_turn:
                                 for part in message.server_content.model_turn.parts:
                                     if part.inline_data:
                                         raw_audio = part.inline_data.data
                                         print(f"🔊 Gemini audio: {len(raw_audio)} bytes")
+
                                         remainder = len(raw_audio) % 6
                                         if remainder > 0:
                                             raw_audio = raw_audio[:-remainder]
+
                                         if len(raw_audio) > 0:
                                             try:
                                                 resampled_audio, _ = audioop.ratecv(raw_audio, 2, 1, 24000, 8000, None)
@@ -201,47 +192,49 @@ async def voice_stream(websocket: WebSocket):
                                                 })
                                             except Exception as e:
                                                 print(f"❌ Audio conversion error: {e}")
-                            if message.server_content.turn_complete:
-                                print("✅ Gemini turn complete - next turn starting")
-                                greeting_done.set()
 
+                            # FIX: turn_complete guarded inside 'if message.server_content'
+                            if message.server_content.turn_complete:
+                                print("✅ Gemini turn complete - looping for next turn")
+                                greeting_done.set()
+                        # after this inner for-loop ends, while True restarts session.receive()
+
+            except asyncio.CancelledError:
+                print("🛑 send_to_twilio cancelled (call ended cleanly)")
             except Exception as e:
                 print(f"💥 send_to_twilio CRASHED: {e}")
                 traceback.print_exc()
             finally:
-                print("⚠️ send_to_twilio EXITED")
+                print("✅ send_to_twilio done")
 
         async def send_to_gemini():
-            """Reads from queue and forwards audio to Gemini — runs independently"""
+            """Reads from queue and forwards audio to Gemini."""
             await greeting_done.wait()
-            print(f"Now listening - draining {audio_queue.qsize()} pre-greeting items")
-
+            print(f"Greeting complete - draining {audio_queue.qsize()} pre-greeting items")
             while not audio_queue.empty():
                 audio_queue.get_nowait()
                 audio_queue.task_done()
-            print("Queue drained, ready for user speech")
+            print("Queue drained, now forwarding user audio to Gemini")
 
-            #silent_chunk = b'\x00' * 3200
             audio_buffer = bytearray()
-            SEND_SIZE = 6400
+            SEND_SIZE = 6400  # 200ms at 16kHz
 
             try:
                 while True:
                     try:
                         pcm_data = await asyncio.wait_for(audio_queue.get(), timeout=2.0)
-                        if pcm_data is None:  # Poison pill — shut down
+                        if pcm_data is None:  # poison pill — shut down
                             break
                         audio_buffer.extend(pcm_data)
                         audio_queue.task_done()
-                        
-                        #print(f"Sending {len(pcm_data)} bytes to Gemini")
+
                         while len(audio_buffer) >= SEND_SIZE:
                             await session.send_realtime_input(
                                 media=types.Blob(
                                     data=bytes(audio_buffer[:SEND_SIZE]),
                                     mime_type="audio/pcm;rate=16000"
-                                    )
                                 )
+                            )
                             audio_buffer = audio_buffer[SEND_SIZE:]
                             print(f"Sent {SEND_SIZE} bytes")
 
@@ -255,14 +248,12 @@ async def voice_stream(websocket: WebSocket):
                             )
                             print(f"Flushed {len(audio_buffer)} bytes on timeout")
                             audio_buffer = bytearray()
-            except Exception as e:
-                print(f"❌ send_to_gemini error: {e}")
-                traceback.print_exc()
 
-        # Both tasks run concurrently — neither blocks the other
-        #send_task = asyncio.create_task(send_to_twilio())
-        #gemini_task = asyncio.create_task(send_to_gemini())
-        #keepalive_task = asyncio.create_task(keepalive())
+            except asyncio.CancelledError:
+                print("🛑 send_to_gemini cancelled (call ended cleanly)")
+            except Exception as e:
+                print(f"💥 send_to_gemini CRASHED: {e}")
+                traceback.print_exc()
 
         def task_exception_handler(task):
             if not task.cancelled():
@@ -293,8 +284,7 @@ async def voice_stream(websocket: WebSocket):
                     mu_law_data = base64.b64decode(payload)
                     pcm_data = audioop.ulaw2lin(mu_law_data, 2)
                     boosted_pcm = audioop.mul(pcm_data, 2, 1.5)
-                    print(f"Twilio media received, queue size: {audio_queue.qsize()}")
-                    #Just enqueue — never awaits Gemini directly in this loop
+                    # FIX: upsample 8kHz → 16kHz (Gemini requires 16kHz)
                     pcm_16k, _ = audioop.ratecv(boosted_pcm, 2, 1, 8000, 16000, None)
                     await audio_queue.put(pcm_16k)
 
@@ -305,18 +295,24 @@ async def voice_stream(websocket: WebSocket):
                 elif data['event'] == "mark":
                     print(f"Mark: {data}")
 
+                elif data['event'] == "connected":
+                    pass  # expected first message, no action needed
+
                 else:
                     print(f"Unknown event: {data['event']}")
 
         except Exception as e:
             print(f"❌ WebSocket error: {e}")
         finally:
-            await audio_queue.put(None)  # Shut down gemini_task cleanly
+            await audio_queue.put(None)  # shut down send_to_gemini cleanly
             send_task.cancel()
             gemini_task.cancel()
-            #keepalive_task.cancel()
+            try:
+                await asyncio.gather(send_task, gemini_task, return_exceptions=True)
+            except Exception:
+                pass
             try:
                 await websocket.close()
-            except:
+            except Exception:
                 pass
             print("✅ Connection closed")
