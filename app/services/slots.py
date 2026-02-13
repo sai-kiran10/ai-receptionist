@@ -44,22 +44,21 @@ def cleanup_and_seed_slots(today_str: str):
         print(f"DEBUG: Ensuring 7-day slot availability starting from {today_str}...")
         
         # Define the hours you want available every day
-        business_hours = ["09:00", "11:00", "14:00", "16:00"]
+        business_hours = ["09:00", "10:00", "11:00", "12:00", "13:00", "14:00", "15:00", "16:00"]
         start_date = datetime.strptime(today_str, "%Y-%m-%d")
 
         for i in range(7):
             current_date_obj = start_date + timedelta(days=i)
             current_date_str = current_date_obj.strftime("%Y-%m-%d")
 
-            # Check if this specific day already has slots
-            res = slots_table.scan(FilterExpression=Attr('date').eq(current_date_str))
-            
-            if not res.get('Items'):
-                print(f"DEBUG: Seeding {current_date_str}...")
-                for hr in business_hours:
+            for hr in business_hours:
+                slot_id = f"{current_date_str}-{hr}"
+                existing = slots_table.get_item(Key={'slot_id': slot_id})
+                if not existing.get('Item'):
+                    print(f"DEBUG: Seeding missing slot {slot_id}...")
                     slots_table.put_item(
                         Item={
-                            'slot_id': f"{current_date_str}-{hr}",
+                            'slot_id': slot_id,
                             'date': current_date_str,
                             'start_time': hr,
                             'status': 'AVAILABLE',

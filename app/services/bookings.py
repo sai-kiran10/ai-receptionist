@@ -20,12 +20,16 @@ twilio_client = Client(account_sid, auth_token)
 def send_sms_notification(phone_number: str, message: str):
     """Sends an SMS notification via Twilio WhatsApp Sandbox."""
     try:
-       # If the incoming phone_number doesn't already have the prefix, add it
-        to_whatsapp = phone_number if phone_number.startswith("whatsapp:") else f"whatsapp:{phone_number}"
+        raw = phone_number.replace("whatsapp:", "").replace("+", "").strip()
+        if len(raw) == 10:          
+            raw = "1" + raw
+        e164 = "+" + raw
+
+        to_whatsapp = f"whatsapp:{e164}"
         from_whatsapp = f"whatsapp:{twilio_number}"
-        
+
         print(f"DEBUG: Sending WhatsApp to {to_whatsapp} from {from_whatsapp}")
-        
+
         twilio_client.messages.create(
             body=message,
             from_=from_whatsapp,
@@ -255,5 +259,4 @@ def reschedule_appointment(appointment_id: str, new_slot_id: str):
         return {"success": True, "message": f"Appointment moved to {new_slot_id}. Please confirm the new time."}
     except Exception as e:
         return {"success": False, "error": str(e)}
-
- 
+    
