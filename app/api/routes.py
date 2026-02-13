@@ -117,7 +117,7 @@ async def voice_stream(websocket: WebSocket):
         "system_instruction": (
             "You are a friendly medical receptionist on a live phone call. "
             "Keep responses brief and natural. When looking up info say 'Let me check that for you.' "
-            "Wait for the patient to finish speaking before responding. If patient interrupts you, then stop talking and listen to their request."
+            "Wait for the patient to finish speaking before responding."
         )
     }
 
@@ -150,57 +150,60 @@ async def voice_stream(websocket: WebSocket):
                     break'''
 
         async def send_to_twilio():
-            """Receives audio from Gemini and forwards to Twilio"""
+            """Receives audio from Gemini and forwards to Twilio.
+            session.receive() ends after each turn (by design), so we loop to catch all turns.
+            """
+            print("🔁 send_to_twilio started")
             try:
-                async for message in session.receive():
-                    print(f"DEBUG msg type: server_content={bool(message.server_content)}, tool_call={bool(message.tool_call)}, setup_complete={bool(message.setup_complete)}")
-                    if message.tool_call:
-                        for fc in message.tool_call.function_calls:
-                            f_name = fc.name
-                            f_args = fc.args
-                            print(f"🛠️ Tool called: {f_name} with {f_args}")
-                            func = FUNCTIONS.get(f_name)
-                            try:
-                                result = func(**f_args) if func else {"error": "Function not found"}
-                                print(f"✅ Tool result: {result}")
-                            except Exception as e:
-                                print(f"❌ Tool error: {e}")
-                                result = {"error": str(e)}
+                while True:
+                    print("🔄 Waiting for next Gemini turn...")
+                    async for message in session.receive():
+                        print(f"DEBUG msg type: server_content={bool(message.server_content)}, tool_call={bool(message.tool_call)}, setup_complete={bool(message.setup_complete)}")
 
-                            await session.send_tool_response(
-                                        function_responses=types.FunctionResponse(
-                                                name=f_name,
-                                                id=fc.id,
-                                                response={"result": result}
-                                            )
+                        if message.tool_call:
+                            for fc in message.tool_call.function_calls:
+                                f_name = fc.name
+                                f_args = fc.args
+                                print(f"🛠️ Tool called: {f_name} with {f_args}")
+                                func = FUNCTIONS.get(f_name)
+                                try:
+                                    result = func(**f_args) if func else {"error": "Function not found"}
+                                    print(f"✅ Tool result: {result}")
+                                except Exception as e:
+                                    print(f"❌ Tool error: {e}")
+                                    result = {"error": str(e)}
+                                await session.send_tool_response(
+                                    function_responses=types.FunctionResponse(
+                                        name=f_name,
+                                        id=fc.id,
+                                        response={"result": result}
+                                    )
                                 )
-                    if message.server_content:
-                        if message.server_content.model_turn:
-                            for part in message.server_content.model_turn.parts:
-                                if part.inline_data:
-                                    raw_audio = part.inline_data.data
-                                    print(f"🔊 Gemini audio: {len(raw_audio)} bytes")
 
-                                    remainder = len(raw_audio) % 6
-                                    if remainder > 0:
-                                        raw_audio = raw_audio[:-remainder]
-
-                                    if len(raw_audio) > 0:
-                                        try:
-                                            resampled_audio, _ = audioop.ratecv(raw_audio, 2, 1, 24000, 8000, None)
-                                            mulaw_audio = audioop.lin2ulaw(resampled_audio, 2)
-                                            audio_payload = base64.b64encode(mulaw_audio).decode('utf-8')
-                                            await websocket.send_json({
-                                                "event": "media",
-                                                "streamSid": stream_sid,
-                                                "media": {"payload": audio_payload}
-                                            })
-                                        except Exception as e:
-                                            print(f"❌ Audio conversion error: {e}")
-
-                        if message.server_content.turn_complete:
-                            print("✅ Gemini turn complete - Listening for user")
-                            greeting_done.set()
+                        if message.server_content:
+                            if message.server_content.model_turn:
+                                for part in message.server_content.model_turn.parts:
+                                    if part.inline_data:
+                                        raw_audio = part.inline_data.data
+                                        print(f"🔊 Gemini audio: {len(raw_audio)} bytes")
+                                        remainder = len(raw_audio) % 6
+                                        if remainder > 0:
+                                            raw_audio = raw_audio[:-remainder]
+                                        if len(raw_audio) > 0:
+                                            try:
+                                                resampled_audio, _ = audioop.ratecv(raw_audio, 2, 1, 24000, 8000, None)
+                                                mulaw_audio = audioop.lin2ulaw(resampled_audio, 2)
+                                                audio_payload = base64.b64encode(mulaw_audio).decode('utf-8')
+                                                await websocket.send_json({
+                                                    "event": "media",
+                                                    "streamSid": stream_sid,
+                                                    "media": {"payload": audio_payload}
+                                                })
+                                            except Exception as e:
+                                                print(f"❌ Audio conversion error: {e}")
+                            if message.server_content.turn_complete:
+                                print("✅ Gemini turn complete - next turn starting")
+                                greeting_done.set()
 
             except Exception as e:
                 print(f"💥 send_to_twilio CRASHED: {e}")
