@@ -20,9 +20,10 @@ twilio_client = Client(account_sid, auth_token)
 def send_sms_notification(phone_number: str, message: str):
     """Sends an SMS notification via Twilio WhatsApp Sandbox."""
     try:
+        # Normalize to E.164: strip any existing prefix, add +1 for bare 10-digit US numbers
         raw = phone_number.replace("whatsapp:", "").replace("+", "").strip()
-        if len(raw) == 10:          
-            raw = "1" + raw
+        if len(raw) == 10:
+            raw = "1" + raw   # add US country code
         e164 = "+" + raw
 
         to_whatsapp = f"whatsapp:{e164}"
@@ -123,6 +124,8 @@ def confirm_appointment(slot_id: str, phone_number: str):
     """
     Finalizes a booking that is currently being held.
     Call this ONLY after the user confirms they definitely want to book the appointment.
+    Uses a DynamoDB transaction so the slot update and appointment record are atomic —
+    if anything fails mid-way, neither write persists (no ghost bookings).
     After finalizing the appointment send an SMS.
     Args:
         slot_id: The unique ID of the slot (e.g., '2026-01-22-10:00')
@@ -130,46 +133,63 @@ def confirm_appointment(slot_id: str, phone_number: str):
     """
     print(f"DEBUG: AI invoking confirm_appointment for {slot_id}")
     now_ts = current_ts()
-    
+    appointment_id = str(uuid.uuid4())
+
     try:
-        #Update Slot status to BOOKED
-        slots_table.update_item(
-            Key={"slot_id": slot_id},
-            UpdateExpression="SET #s = :booked, is_available = :false",
-            ConditionExpression="#s = :held AND hold_expires_at > :now",
-            ExpressionAttributeNames={"#s": "status"},
-            ExpressionAttributeValues={
-                ":held": "HELD", 
-                ":booked": "BOOKED", 
-                ":now": now_ts,
-                ":false": False
-            }
+        # Single atomic transaction: update slot AND create appointment record together.
+        # If either write fails, both are rolled back — no ghost bookings possible.
+        dynamodb = boto3.resource('dynamodb', region_name=os.getenv('AWS_REGION', 'us-east-1'))
+        dynamodb.meta.client.transact_write(
+            TransactItems=[
+                {
+                    "Update": {
+                        "TableName": slots_table.name,
+                        "Key": {"slot_id": slot_id},
+                        "UpdateExpression": "SET #s = :booked, is_available = :false",
+                        "ConditionExpression": "#s = :held AND hold_expires_at > :now",
+                        "ExpressionAttributeNames": {"#s": "status"},
+                        "ExpressionAttributeValues": {
+                            ":held": "HELD",
+                            ":booked": "BOOKED",
+                            ":now": now_ts,
+                            ":false": False
+                        }
+                    }
+                },
+                {
+                    "Put": {
+                        "TableName": appointments_table.name,
+                        "Item": {
+                            "appointment_id": appointment_id,
+                            "slot_id": slot_id,
+                            "phone_number": phone_number,
+                            "status": "CONFIRMED",
+                            "created_at": current_iso()
+                        },
+                        # Extra safety: don't overwrite if appointment_id somehow collides
+                        "ConditionExpression": "attribute_not_exists(appointment_id)"
+                    }
+                }
+            ]
         )
-        
-        #Create the permanent Appointment record
-        appointment_id = str(uuid.uuid4())
-        appointments_table.put_item(
-            Item={
-                "appointment_id": appointment_id,
-                "slot_id": slot_id,
-                "phone_number": phone_number,
-                "status": "CONFIRMED",
-                "created_at": current_iso()
-            }
-        )
-        
+
         sms_msg = f"Confirmed! Your appointment at the Clinic is set for {slot_id}. Booking ID: {appointment_id}"
         send_sms_notification(phone_number, sms_msg)
 
         return {
-            "success": True, 
+            "success": True,
             "appointment_id": appointment_id,
             "message": "Appointment confirmed and SMS sent!"
         }
 
     except ClientError as e:
-        if e.response['Error']['Code'] == 'ConditionalCheckFailedException':
-            return {"success": False, "message": "Hold expired or slot was already booked. Please try again."}
+        code = e.response['Error']['Code']
+        if code == 'TransactionCanceledException':
+            reasons = e.response.get('CancellationReasons', [])
+            # First item is the slot update — if that condition failed, hold expired or slot taken
+            if reasons and reasons[0].get('Code') == 'ConditionalCheckFailed':
+                return {"success": False, "message": "Hold expired or slot was already booked. Please try hold the slot again."}
+            return {"success": False, "message": "Booking transaction failed. Please try again."}
         return {"success": False, "message": f"Database error: {str(e)}"}
 
 def get_appointments_by_phone(phone_number: str):
@@ -259,4 +279,3 @@ def reschedule_appointment(appointment_id: str, new_slot_id: str):
         return {"success": True, "message": f"Appointment moved to {new_slot_id}. Please confirm the new time."}
     except Exception as e:
         return {"success": False, "error": str(e)}
-    
