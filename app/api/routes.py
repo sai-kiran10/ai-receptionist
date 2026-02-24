@@ -1,5 +1,10 @@
 from fastapi import APIRouter, Depends, Form, Response, WebSocket, Request
-from app.services.bookings import HoldSlotRequest, ConfirmAppointmentRequest, hold_slot, confirm_appointment, get_appointments_by_phone, cancel_appointment
+from app.services.bookings import (
+    HoldSlotRequest, ConfirmAppointmentRequest,
+    hold_slot, confirm_appointment,
+    get_appointments_by_phone, cancel_appointment,
+    resend_confirmation
+)
 from app.services.slots import get_available_slots
 from app.services.gemini_service import GeminiService
 from app.services.llm_interface import LLMInterface
@@ -26,6 +31,7 @@ FUNCTIONS = {
     "confirm_appointment": confirm_appointment,
     "get_appointments_by_phone": get_appointments_by_phone,
     "cancel_appointment": cancel_appointment,
+    "resend_confirmation": resend_confirmation,
 }
 
 def _patched_ws_connect(uri, **kwargs):
@@ -33,6 +39,8 @@ def _patched_ws_connect(uri, **kwargs):
     kwargs['ping_timeout'] = None
     return _orig_connect(uri, **kwargs)
 _live_module.ws_connect = _patched_ws_connect
+
+# ── REST endpoints ────────────────────────────────────────────────────────────
 
 @router.post("/slots/hold")
 def hold(request: HoldSlotRequest):
@@ -78,6 +86,8 @@ async def handle_voice_entry(request: Request):
     print(f"Streaming to: {stream_url}")
     return Response(content=str(response), media_type="application/xml")
 
+# ── Voice WebSocket ───────────────────────────────────────────────────────────
+
 @router.websocket("/voice/stream")
 async def voice_stream(websocket: WebSocket):
     await websocket.accept()
@@ -88,9 +98,10 @@ async def voice_stream(websocket: WebSocket):
         http_options={'api_version': 'v1alpha'}
     )
 
-    '''now = datetime.now()
-    today_str   = now.strftime("%Y-%m-%d")
-    today_words = now.strftime("%A, %B %d, %Y") '''
+    # Inject today's date so Gemini resolves "tomorrow", "next Monday" etc.
+    now = datetime.now()
+    today_str   = now.strftime("%Y-%m-%d")       # e.g. 2026-02-13
+    today_words = now.strftime("%A, %B %d, %Y")  # e.g. Friday, February 13, 2026
 
     config = {
         "response_modalities": ["AUDIO"],
@@ -165,10 +176,22 @@ async def voice_stream(websocket: WebSocket):
                     "properties": {"appointment_id": {"type": "STRING"}},
                     "required": ["appointment_id"]
                 }
+            },
+            {
+                "name": "resend_confirmation",
+                "description": "Resend confirmation SMS for the patient's most recent appointment. Use when patient says they didn't receive the SMS or asks to resend.",
+                "parameters": {
+                    "type": "OBJECT",
+                    "properties": {"phone_number": {"type": "STRING"}},
+                    "required": ["phone_number"]
+                }
             }
         ]}],
         "system_instruction": (
-            f"You are a medical receptionist AI for The Tech Clinic on a live phone call. "
+            f"You are a medical receptionist AI on a live phone call. "
+            f"Today is {today_words} (ISO: {today_str}). "
+            f"Use this to resolve relative dates — 'tomorrow', 'next Monday', 'this Friday' etc. "
+            f"Always convert to YYYY-MM-DD before calling get_available_slots. "
             "CRITICAL RULES — follow without exception:\n"
             "1. MUST call get_available_slots before discussing any appointment times.\n"
             "2. MUST call hold_slot before saying a slot is reserved.\n"
@@ -176,13 +199,13 @@ async def voice_stream(websocket: WebSocket):
             "4. NEVER say an appointment is confirmed without calling confirm_appointment first.\n"
             "5. NEVER invent slot IDs, times, or confirmation details.\n"
             "6. Always get the patient's phone number before calling hold_slot or confirm_appointment.\n"
-            "7. To resend a confirmation SMS, call confirm_appointment again with the same details.\n"
+            "7. If patient says 'didn't get SMS' or 'resend confirmation', call resend_confirmation with their phone number.\n"
             "8. To check existing bookings, call get_appointments_by_phone first.\n"
             "9. NEVER say you sent a message without calling a tool that actually sends it.\n"
             "10. If the patient interrupts you while you are speaking, stop immediately and listen. "
-            "11. Ask for patient name, phone number and their preferred appointment time once and remember it throughout. Don't ask them again and again.\n"
-            "Keep responses brief and natural. You must say 'Let me check that for you' before tool calls or while you are checking for a slot. NEVER stay silent at any moment in the call. "
-            "Wait for the patient to finish speaking before responding. If they speak in between then stop and listen to their request. Say 'Goodbye, Have a nice day' when patient is about to hang up the call."
+            "Do not finish your sentence. Acknowledge briefly if needed and respond to what they said.\n"
+            "Keep responses brief and natural. Say 'Let me check that for you' before tool calls. "
+            "Wait for the patient to finish speaking before responding."
         )
     }
 
@@ -198,9 +221,19 @@ async def voice_stream(websocket: WebSocket):
         )
         print("✅ Greeting sent to Gemini")
 
+        # ── send_to_twilio ────────────────────────────────────────────────────
         async def send_to_twilio():
             """
             Receives responses from Gemini and forwards audio to Twilio.
+
+            FIX 1: session.receive() ends after every turn_complete by SDK design.
+                   The while True loop restarts it for the next turn.
+            FIX 2: server_content guard prevents AttributeError crash on tool_call
+                   messages (where server_content is None).
+            FIX 3: Barge-in / interruption — when Gemini detects the user speaking
+                   mid-response it sets interrupted=True. We send a Twilio 'clear'
+                   event to flush buffered audio so the caller hears silence
+                   immediately, not the rest of Gemini's sentence.
             """
             print("🔁 send_to_twilio started")
             try:
@@ -213,6 +246,7 @@ async def voice_stream(websocket: WebSocket):
                             f"setup_complete={bool(message.setup_complete)}"
                         )
 
+                        # ── Tool calls ────────────────────────────────────────
                         if message.tool_call:
                             for fc in message.tool_call.function_calls:
                                 f_name = fc.name
@@ -233,7 +267,16 @@ async def voice_stream(websocket: WebSocket):
                                     )
                                 )
 
+                        # ── Audio, interruption, turn_complete ────────────────
+                        # ALL server_content access must be inside this guard.
+                        # tool_call messages have server_content=None — touching it
+                        # without this check raises AttributeError and silently
+                        # kills this task, stopping all future Gemini replies.
                         if message.server_content:
+
+                            # BARGE-IN: user spoke while Gemini was talking.
+                            # Gemini stops generating; we flush Twilio's audio buffer
+                            # so the caller doesn't hear the tail end of the sentence.
                             if message.server_content.interrupted:
                                 print("🤚 Barge-in detected — clearing Twilio audio buffer")
                                 if stream_sid:
@@ -279,6 +322,7 @@ async def voice_stream(websocket: WebSocket):
             finally:
                 print("✅ send_to_twilio done")
 
+        # ── send_to_gemini ────────────────────────────────────────────────────
         async def send_to_gemini():
             """
             Reads microphone audio from the queue and streams it to Gemini.
@@ -331,6 +375,7 @@ async def voice_stream(websocket: WebSocket):
                 print(f"💥 send_to_gemini CRASHED: {e}")
                 traceback.print_exc()
 
+        # ── Task wiring ───────────────────────────────────────────────────────
         def task_exception_handler(task):
             if not task.cancelled():
                 try:
@@ -346,6 +391,7 @@ async def voice_stream(websocket: WebSocket):
         send_task.add_done_callback(task_exception_handler)
         gemini_task.add_done_callback(task_exception_handler)
 
+        # ── Main WebSocket receive loop ───────────────────────────────────────
         try:
             while True:
                 raw = await websocket.receive_text()
@@ -364,6 +410,7 @@ async def voice_stream(websocket: WebSocket):
                     mu_law     = base64.b64decode(payload)
                     pcm_8k     = audioop.ulaw2lin(mu_law, 2)
                     pcm_8k     = audioop.mul(pcm_8k, 2, 1.5)         # slight volume boost
+                    # Gemini requires 16kHz — upsample from Twilio's 8kHz
                     pcm_16k, _ = audioop.ratecv(pcm_8k, 2, 1, 8000, 16000, None)
                     await audio_queue.put(pcm_16k)
 

@@ -20,14 +20,17 @@ twilio_client = Client(account_sid, auth_token)
 def send_sms_notification(phone_number: str, message: str):
     """Sends an SMS notification via Twilio WhatsApp Sandbox."""
     try:
-        raw = phone_number.replace("whatsapp:", "").replace("+", "").strip()
-        if len(raw) == 10:
-            raw = "1" + raw
-        e164 = "+" + raw
-        to_whatsapp = f"whatsapp:{e164}"
+       # If the incoming phone_number doesn't already have the prefix, add it
+        to_whatsapp = phone_number if phone_number.startswith("whatsapp:") else f"whatsapp:{phone_number}"
         from_whatsapp = f"whatsapp:{twilio_number}"
+        
         print(f"DEBUG: Sending WhatsApp to {to_whatsapp} from {from_whatsapp}")
-        twilio_client.messages.create(body=message, from_=from_whatsapp, to=to_whatsapp)
+        
+        twilio_client.messages.create(
+            body=message,
+            from_=from_whatsapp,
+            to=to_whatsapp,
+        )
         return True
     except Exception as e:
         print(f"ERROR: Failed to send WhatsApp: {e}")
@@ -66,7 +69,7 @@ def sanitize_decimal(data):
 
 # ----------------- AI-Facing Tools -----------------
 
-def hold_slot(slot_id: str, phone_number: str, hold_seconds: int = 300):
+def hold_slot(slot_id: str, phone_number: str, hold_seconds: int = 60):
     """
     Temporarily holds an appointment slot. 
     
@@ -85,14 +88,13 @@ def hold_slot(slot_id: str, phone_number: str, hold_seconds: int = 300):
     try:
         response = slots_table.update_item(
             Key={"slot_id": slot_id},
-            UpdateExpression="SET #s = :held, hold_expires_at = :ttl, held_by = :phone, version = version + :inc",
+            UpdateExpression="SET #s = :held, hold_expires_at = :ttl, version = version + :inc",
             ConditionExpression="#s = :avail",
             ExpressionAttributeNames={"#s": "status"},
             ExpressionAttributeValues={
-                ":avail": "AVAILABLE",
-                ":held": "HELD",
-                ":ttl": ttl,
-                ":phone": phone_number,
+                ":avail": "AVAILABLE", 
+                ":held": "HELD", 
+                ":ttl": ttl, 
                 ":inc": 1
             },
             ReturnValues="ALL_NEW"
@@ -115,79 +117,94 @@ def hold_slot(slot_id: str, phone_number: str, hold_seconds: int = 300):
 
 def confirm_appointment(slot_id: str, phone_number: str):
     """
-    Finalizes a booking. Works whether the slot is HELD or AVAILABLE.
-    Reads slot state first, then updates with the appropriate condition.
+    Finalizes a booking that is currently being held.
+    Call this ONLY after the user confirms they definitely want to book the appointment.
+    After finalizing the appointment send an SMS.
+    Args:
+        slot_id: The unique ID of the slot (e.g., '2026-01-22-10:00')
+        phone_number: The user's contact number.
     """
     print(f"DEBUG: AI invoking confirm_appointment for {slot_id}")
     now_ts = current_ts()
-
+    
     try:
-        # Step 1: read current slot state
-        res = slots_table.get_item(Key={"slot_id": slot_id})
-        slot = res.get("Item")
-        if not slot:
-            return {"success": False, "message": f"Slot {slot_id} not found."}
-
-        status          = slot.get("status", "")
-        held_by         = slot.get("held_by", "")
-        hold_expires_at = int(slot.get("hold_expires_at", 0))
-
-        print(f"DEBUG: slot state — status={status}, held_by={held_by}, expires={hold_expires_at}, now={now_ts}")
-
-        if status == "BOOKED":
-            return {"success": False, "message": "This slot is already booked. Please choose a different time."}
-
-        # If held by someone else and hold is still active, reject
-        if status == "HELD" and held_by and held_by != phone_number and hold_expires_at > now_ts:
-            return {"success": False, "message": "This slot is held by another caller. Please choose a different time."}
-
-        # Step 2: mark slot as BOOKED — accept HELD (any holder) or AVAILABLE
-        try:
-            slots_table.update_item(
-                Key={"slot_id": slot_id},
-                UpdateExpression="SET #s = :booked, is_available = :false",
-                ConditionExpression="#s IN (:held, :avail)",
-                ExpressionAttributeNames={"#s": "status"},
-                ExpressionAttributeValues={
-                    ":booked": "BOOKED",
-                    ":held":   "HELD",
-                    ":avail":  "AVAILABLE",
-                    ":false":  False
-                }
-            )
-        except ClientError as e:
-            if e.response['Error']['Code'] == 'ConditionalCheckFailedException':
-                return {"success": False, "message": "Slot was just taken by someone else. Please choose a different time."}
-            raise
-
-        # Step 3: create appointment record
+        #Update Slot status to BOOKED
+        slots_table.update_item(
+            Key={"slot_id": slot_id},
+            UpdateExpression="SET #s = :booked, is_available = :false",
+            ConditionExpression="#s = :held AND hold_expires_at > :now",
+            ExpressionAttributeNames={"#s": "status"},
+            ExpressionAttributeValues={
+                ":held": "HELD", 
+                ":booked": "BOOKED", 
+                ":now": now_ts,
+                ":false": False
+            }
+        )
+        
+        #Create the permanent Appointment record
         appointment_id = str(uuid.uuid4())
         appointments_table.put_item(
             Item={
                 "appointment_id": appointment_id,
-                "slot_id":        slot_id,
-                "phone_number":   phone_number,
-                "status":         "CONFIRMED",
-                "created_at":     current_iso()
+                "slot_id": slot_id,
+                "phone_number": phone_number,
+                "status": "CONFIRMED",
+                "created_at": current_iso()
             }
         )
-
+        
         sms_msg = f"Confirmed! Your appointment at the Clinic is set for {slot_id}. Booking ID: {appointment_id}"
         send_sms_notification(phone_number, sms_msg)
-        print(f"DEBUG: Appointment confirmed — id={appointment_id}")
 
         return {
-            "success": True,
+            "success": True, 
             "appointment_id": appointment_id,
             "message": "Appointment confirmed and SMS sent!"
         }
 
     except ClientError as e:
-        print(f"ERROR in confirm_appointment: {e}")
+        if e.response['Error']['Code'] == 'ConditionalCheckFailedException':
+            return {"success": False, "message": "Hold expired or slot was already booked. Please try again."}
         return {"success": False, "message": f"Database error: {str(e)}"}
+
+
+def resend_confirmation(phone_number: str):
+    """
+    Resend confirmation SMS for the patient's most recent appointment.
+    Use when patient says they didn't receive the confirmation or asks you to resend it.
+    """
+    print(f"DEBUG: AI invoking resend_confirmation for {phone_number}")
+    try:
+        from boto3.dynamodb.conditions import Attr
+        response = appointments_table.scan(
+            FilterExpression=Attr('phone_number').eq(phone_number)
+        )
+        items = response.get('Items', [])
+        
+        if not items:
+            return {"success": False, "message": "No appointments found for this number."}
+        
+        # Get most recent appointment
+        items_sorted = sorted(items, key=lambda x: x.get('created_at', ''), reverse=True)
+        appt = items_sorted[0]
+        
+        slot_id = appt['slot_id']
+        appointment_id = appt['appointment_id']
+        
+        sms_msg = f"Confirmed! Your appointment at the Clinic is set for {slot_id}. Booking ID: {appointment_id}"
+        send_sms_notification(phone_number, sms_msg)
+        print(f"DEBUG: Resent confirmation for {appointment_id}")
+        
+        return {
+            "success": True,
+            "message": "Confirmation SMS resent successfully!",
+            "appointment_id": appointment_id,
+            "slot_id": slot_id
+        }
     except Exception as e:
-        print(f"ERROR in confirm_appointment (unexpected): {e}")
-        return {"success": False, "message": f"Unexpected error: {str(e)}"}
+        print(f"ERROR in resend_confirmation: {e}")
+        return {"success": False, "message": f"Error: {str(e)}"}
 
 def get_appointments_by_phone(phone_number: str):
     """
