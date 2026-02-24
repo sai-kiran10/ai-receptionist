@@ -34,6 +34,8 @@ class GeminiService(LLMInterface):
                     f"in your memory. If the user doesn't specify a date, use today's date ({today_date}). When a user picks a time, map it to the corresponding slot_id and call hold_slot immediately."
                     "You MUST remember details provided by the user (like their name, phone number, and chosen date/time) "
                     "throughout the conversation. If they mention a time once, do not ask for it again.\n"
+                    "If the user mention's a date, don't say the times/slots which are already done (e.g., if user calls in the afternoon for availability for today,"
+                    "then don't give the user the option to choose slots which are in the morning)"
                     "If the user provides a date and time, you must internalize it and" 
                     "map it to the available slot_id format (YYYY-MM-DD-HH:MM)." 
                     "Do not ask the user to use a specific format; translate their natural language (e.g., 'Tomorrow at 3') into the correct ID yourself.\n\n"

@@ -67,8 +67,6 @@ def sanitize_decimal(data):
         return int(data) if data % 1 == 0 else float(data)
     return data
 
-# ----------------- AI-Facing Tools -----------------
-
 def hold_slot(slot_id: str, phone_number: str, hold_seconds: int = 60):
     """
     Temporarily holds an appointment slot. 
