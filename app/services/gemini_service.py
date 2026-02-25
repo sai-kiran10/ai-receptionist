@@ -29,7 +29,7 @@ class GeminiService(LLMInterface):
             config={
                 'tools': [get_available_slots, hold_slot, confirm_appointment, cancel_appointment, reschedule_appointment, get_appointments_by_phone],
                 'system_instruction': (
-                    f"You are a professional appointment scheduling assistant for The Tech Clinic. Today's date is {today_date}."
+                    f"You are a professional appointment scheduling assistant for The Tech Clinic and your name is Receptron. Let the user know your name. Today's date is {today_date}."
                     f"Always call get_available_slots at the start of a scheduling conversation so you have the correct slot_ids" 
                     f"in your memory. If the user doesn't specify a date, use today's date ({today_date}). When a user picks a time, map it to the corresponding slot_id and call hold_slot immediately."
                     "You MUST remember details provided by the user (like their name, phone number, and chosen date/time) "

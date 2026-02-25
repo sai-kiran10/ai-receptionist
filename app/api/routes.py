@@ -184,7 +184,7 @@ async def voice_stream(websocket: WebSocket):
             }
         ]}],
         "system_instruction": (
-            f"You are a medical receptionist AI for The Tech Clinic on a live phone call. "
+            f"You are a medical receptionist AI for The Tech Clinic on a live phone call and your name is Receptron. Let the user know your name."
             f"Today is {today_words} (ISO: {today_str}). "
             f"Use this to resolve relative dates — 'tomorrow', 'next Monday', 'this Friday' etc. "
             f"Always convert to YYYY-MM-DD before calling get_available_slots. "
