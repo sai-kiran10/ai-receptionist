@@ -190,6 +190,7 @@ async def voice_stream(websocket: WebSocket):
             f"Always convert to YYYY-MM-DD before calling get_available_slots. "
             "Remember the patient's name and phone number during the whole conversation and don't ask for it again and again."
             "CRITICAL RULES — follow without exception:\n"
+            "0. Never stay silent on the call. Speak something with the user while you search for slots or call the tools but never stay silent."
             "1. MUST call get_available_slots before discussing any appointment times.\n"
             "2. MUST call hold_slot before saying a slot is reserved.\n"
             "3. MUST call confirm_appointment before saying a booking is confirmed.\n"
@@ -227,11 +228,11 @@ async def voice_stream(websocket: WebSocket):
                 while True:
                     print("🔄 Waiting for next Gemini turn...")
                     async for message in session.receive():
-                        print(
+                        '''print(
                             f"DEBUG msg: server_content={bool(message.server_content)}, "
                             f"tool_call={bool(message.tool_call)}, "
                             f"setup_complete={bool(message.setup_complete)}"
-                        )
+                        )'''
 
                         if message.tool_call:
                             for fc in message.tool_call.function_calls:
@@ -273,7 +274,7 @@ async def voice_stream(websocket: WebSocket):
                                 for part in message.server_content.model_turn.parts:
                                     if part.inline_data:
                                         raw_audio = part.inline_data.data
-                                        print(f"🔊 Gemini audio: {len(raw_audio)} bytes")
+                                        #print(f"🔊 Gemini audio: {len(raw_audio)} bytes")
                                         remainder = len(raw_audio) % 6
                                         if remainder:
                                             raw_audio = raw_audio[:-remainder]
@@ -336,7 +337,7 @@ async def voice_stream(websocket: WebSocket):
                                 )
                             )
                             audio_buffer = audio_buffer[SEND_SIZE:]
-                            print(f"Sent {SEND_SIZE} bytes to Gemini")
+                            #print(f"Sent {SEND_SIZE} bytes to Gemini")
 
                     except asyncio.TimeoutError:
                         if audio_buffer:

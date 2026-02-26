@@ -9,14 +9,12 @@ from app.background.expiry import expire_held_slots
 # The Lifespan handles startup and shutdown in one clean block
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # --- Startup Logic ---
-    print("🚀 Starting AI Receptionist...")
+    print("🚀 Starting Receptron")
     # This runs your background task for DynamoDB slot expiry
     bg_task = asyncio.create_task(expire_held_slots())
     
     yield  # The app is now running and "alive"
     
-    # --- Shutdown Logic ---
     print("🛑 Shutting down...")
     bg_task.cancel() # Cleanly stop the background worker
 
