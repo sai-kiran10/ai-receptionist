@@ -7,8 +7,6 @@
 
 An advanced, stateful AI agent designed to automate medical clinic scheduling. This assistant uses **Gemini 2.0 Flash (for SMS)** and **Gemini 2.5 Flash Live (for Calls)** for complex reasoning and **Twilio** for two-way SMS communication and calls, managing the entire booking lifecycle from initial inquiry to atomic database confirmation.
 
-
-
 ---
 
 ## 🌟 Features
@@ -190,6 +188,9 @@ The voice system uses a sophisticated audio pipeline to achieve sub-500ms respon
 * **🔔 Proactive Reminders:** Automated SMS/voice reminders 24 hours before appointment to reduce no-shows.
 
 ---
+
+[![AI Receptionist Demo](https://img.youtube.com/vi/S6S67zcYwRc/0.jpg)](https://youtube.com/shorts/S6S67zcYwRc)
+
 
 ## 🤝 Contribution
 Feel free to fork this project and submit PRs.
